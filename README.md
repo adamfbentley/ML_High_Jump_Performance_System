@@ -2,7 +2,7 @@
 
 > Personalised high jump technique optimisation using physics-informed neural networks (PINNs), markerless pose estimation, and graph neural networks.
 
-**Collaborators:** AI PhD student · Biomedical PhD student · National-champion high jumper
+
 
 ---
 
