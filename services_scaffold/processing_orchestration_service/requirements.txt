@@ -1,0 +1,4 @@
+celery==5.3.6
+redis==5.0.1
+httpx==0.25.2
+python-dotenv==1.0.0
