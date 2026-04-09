@@ -1,0 +1,89 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "high-jump-biomechanics"
+version = "0.1.0"
+description = "Physics-Informed Neural Network system for personalised high jump biomechanical analysis and technique optimisation"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Adam F"},
+]
+
+dependencies = [
+    # Core ML
+    "torch>=2.1",
+    "numpy>=1.24",
+    "scipy>=1.11",
+
+    # Pose estimation
+    "mediapipe>=0.10",
+    "opencv-python>=4.8",
+
+    # Visualization
+    "matplotlib>=3.8",
+
+    # Data handling
+    "pandas>=2.1",
+
+    # Utilities
+    "tqdm>=4.66",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+gnn = [
+    "torch-geometric>=2.4",
+]
+pinn = [
+    "deepxde>=1.11",
+]
+biomech_data = [
+    "nimblephysics>=0.10",
+    "ezc3d>=1.5",
+]
+api = [
+    "fastapi>=0.104",
+    "uvicorn>=0.24",
+    "httpx>=0.25",
+]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.1",
+    "mypy>=1.7",
+    "pre-commit>=3.6",
+]
+notebooks = [
+    "jupyter>=1.0",
+    "ipywidgets>=8.1",
+]
+all = [
+    "high-jump-biomechanics[gnn,pinn,biomech_data,api,dev,notebooks]",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-v --tb=short"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true

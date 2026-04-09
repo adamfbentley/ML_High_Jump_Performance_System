@@ -1,0 +1,67 @@
+# =============================================================================
+# High Jump Biomechanical Analysis — .gitignore
+# =============================================================================
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+*.so
+
+# ---- Virtual Environments ----
+.venv/
+venv/
+env/
+ENV/
+
+# ---- IDE ----
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ---- Data (large files — don't commit to git) ----
+data/videos/raw/*
+data/videos/processed/*
+data/poses/landmarks_2d/*
+data/poses/landmarks_3d/*
+data/bvh/*
+data/parameters/*
+data/models/population/*
+data/models/personal/*
+data/calibration/*
+data/public/*
+!data/**/.gitkeep
+
+# ---- Experiment outputs ----
+experiments/results/*
+!experiments/results/.gitkeep
+
+# ---- Notebook checkpoints ----
+.ipynb_checkpoints/
+notebooks/*.html
+
+# ---- PyTorch / ML artifacts ----
+*.pth
+*.pt
+*.ckpt
+*.onnx
+wandb/
+mlruns/
+lightning_logs/
+
+# ---- Environment ----
+.env
+.env.local
+
+# ---- OS ----
+.DS_Store
+Desktop.ini

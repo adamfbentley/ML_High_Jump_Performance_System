@@ -1,0 +1,28 @@
+{
+  "name": "high-jump-biomechanical-analysis-system",
+  "version": "1.0.0",
+  "description": "",
+  "main": "user_profile_service/main.py",
+  "scripts": {
+    "start": "node user_profile_service/main.py"
+  },
+  "dependencies": {
+    "fastapi==0.104.1": "latest",
+    "uvicorn==0.24.0.post1": "latest",
+    "sqlalchemy==2.0.23": "latest",
+    "psycopg2-binary==2.9.9": "latest",
+    "pydantic==2.5.2": "latest",
+    "python-dotenv==1.0.0": "latest",
+    "passlib[bcrypt]==1.7.4": "latest",
+    "python-jose[cryptography]==3.3.0": "latest",
+    "httpx==0.25.2": "latest",
+    "boto3==1.33.1": "latest",
+    "celery==5.3.6": "latest",
+    "redis==5.0.1": "latest",
+    "pytest==7.4.0": "latest",
+    "pytest-mock==3.12.0": "latest",
+    "boto3==1.33.5": "latest",
+    "boto3==1.33.2": "latest",
+    "pytest-asyncio==0.21.1": "latest"
+  }
+}
