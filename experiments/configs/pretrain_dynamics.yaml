@@ -1,11 +1,36 @@
 # Pre-training configuration for inverse dynamics PINN
 # Usage: python scripts/pretrain_dynamics_pinn.py --config experiments/configs/pretrain_dynamics.yaml
+#
+# ── Quick-start (no account needed) ──────────────────────────────────────
+# Step 1 — auto-download the three free Zenodo datasets (~1.7 GB total):
+#   python scripts/download_datasets.py --auto
+# Step 2 — start pre-training immediately on those datasets:
+#   python scripts/pretrain_dynamics_pinn.py --config experiments/configs/pretrain_dynamics.yaml
+#
+# ── Adding higher-priority manual datasets later ──────────────────────────
+# Once you have downloaded AddBiomechanics / BioCV / OpenCap, uncomment the
+# relevant lines in the `datasets` list below (higher priority = richer data).
 
 # ── Data ──────────────────────────────────────────────────────────
 datasets:
-  - addbiomechanics
-  # - biocv        # uncomment after downloading
-  # - opencap      # uncomment after downloading
+  # -- Tier 1: auto-downloadable from Zenodo, no account required ----------
+  # Run:  python scripts/download_datasets.py --auto
+  - cmj_grf_zenodo        # 663 CMJ trials, GRF + accelerometer  (18 MB, priority 8)
+  - cod_ik_id_zenodo       # 30 CoD trials, full IK/ID + GRF       (73 MB, priority 7)
+  - dvj_opensim_zenodo     # 28 subjects, drop-VJ kinematics+GRF   (~1.5 GB, priority 9)
+
+  # -- Tier 2: manual download (free account required) ---------------------
+  # addbiomechanics: https://addbiomechanics.org/download_data.html
+  #   → download "OpenSim Results" zip → place in data/public/addbiomechanics/
+  # - addbiomechanics      # 273 subjects, 70 h, gold-standard      (priority 10)
+  #
+  # biocv: https://doi.org/10.1038/s41597-024-03463-1
+  #   → pip install ezc3d → place .c3d files in data/public/biocv/
+  # - biocv                # 15 subjects, video + markers + GRF     (priority 9)
+  #
+  # opencap: https://simtk.org/projects/opencap
+  #   → place .trc/.mot files in data/public/opencap/
+  # - opencap              # 100 subjects, markerless kinematics     (priority 8)
 
 # Only use jump-relevant movements for transfer to high jump
 movement_filter:
@@ -18,7 +43,7 @@ movement_filter:
 
 window_size: 64       # frames per training window
 stride: 32            # overlap between windows
-max_subjects: null    # null = use all, set to 5 for quick testing
+max_subjects: null    # null = use all; set to 5 for a quick smoke-test
 
 # ── Model ─────────────────────────────────────────────────────────
 model_type: inverse_dynamics   # or "projectile" for flight-phase only

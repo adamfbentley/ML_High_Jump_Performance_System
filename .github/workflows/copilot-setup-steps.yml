@@ -34,11 +34,14 @@ jobs:
               #   • core runtime  (torch, numpy, scipy, mediapipe, opencv, …)
               #   • gnn           (torch-geometric)
               #   • dev           (pytest, ruff, mypy, pre-commit)
+              # Also install `requests` separately — it is used by
+              # scripts/download_datasets.py to pull Zenodo datasets automatically.
               # nimblephysics / ezc3d are Linux-only and large; skip them here —
               # Copilot can install [biomech_data] on demand when working on those loaders.
               run: |
                   pip install --upgrade pip
                   pip install -e ".[gnn,dev]"
+                  pip install requests
 
             - name: Smoke-test: confirm pytest and ruff are available
               run: |
