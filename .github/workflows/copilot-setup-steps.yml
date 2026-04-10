@@ -1,0 +1,46 @@
+name: "Copilot Setup Steps"
+
+# Run automatically when this file changes (validates the setup), and allow
+# manual triggering from the Actions tab.
+on:
+    workflow_dispatch:
+    push:
+        paths:
+            - .github/workflows/copilot-setup-steps.yml
+    pull_request:
+        paths:
+            - .github/workflows/copilot-setup-steps.yml
+
+jobs:
+    # The job MUST be called `copilot-setup-steps` or it will not be picked up by Copilot.
+    copilot-setup-steps:
+        runs-on: ubuntu-latest
+
+        permissions:
+            contents: read
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Set up Python 3.10
+              uses: actions/setup-python@v5
+              with:
+                  python-version: "3.10"
+                  cache: "pip"
+
+            - name: Install project with dev and GNN dependencies
+              # Install the editable package plus all groups Copilot will need:
+              #   • core runtime  (torch, numpy, scipy, mediapipe, opencv, …)
+              #   • gnn           (torch-geometric)
+              #   • dev           (pytest, ruff, mypy, pre-commit)
+              # nimblephysics / ezc3d are Linux-only and large; skip them here —
+              # Copilot can install [biomech_data] on demand when working on those loaders.
+              run: |
+                  pip install --upgrade pip
+                  pip install -e ".[gnn,dev]"
+
+            - name: Smoke-test: confirm pytest and ruff are available
+              run: |
+                  python -m pytest --version
+                  python -m ruff --version
