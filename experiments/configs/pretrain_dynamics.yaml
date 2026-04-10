@@ -3,9 +3,23 @@
 
 # ── Data ──────────────────────────────────────────────────────────
 datasets:
-  - addbiomechanics
-  # - biocv        # uncomment after downloading
-  # - opencap      # uncomment after downloading
+  # -- Tier 1: Zenodo (no account required, download manually) -------------
+  - cmj_grf_zenodo        # 663 CMJ trials, GRF + accelerometer  (18 MB,  priority 8)
+  - cod_ik_id_zenodo      # 30 CoD trials, full IK/ID + GRF       (73 MB,  priority 7)
+  - dvj_opensim_zenodo    # 28 subjects, drop-VJ kinematics+GRF   (1.5 GB, priority 9)
+
+  # -- Tier 2: manual download (free account required) ---------------------
+  # addbiomechanics: https://addbiomechanics.org/download_data.html
+  #   → download "OpenSim Results" zip → place in data/public/addbiomechanics/
+  # - addbiomechanics     # 273 subjects, 70 h, gold-standard      (priority 10)
+  #
+  # biocv: https://doi.org/10.1038/s41597-024-03463-1
+  #   → pip install ezc3d → place .c3d files in data/public/biocv/
+  # - biocv               # 15 subjects, video + markers + GRF     (priority 9)
+  #
+  # opencap: https://simtk.org/projects/opencap
+  #   → place .trc/.mot files in data/public/opencap/
+  # - opencap             # 100 subjects, markerless kinematics     (priority 8)
 
 # Only use jump-relevant movements for transfer to high jump
 movement_filter:
