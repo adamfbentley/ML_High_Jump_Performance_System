@@ -41,7 +41,14 @@ logger = logging.getLogger(__name__)
 def default_config() -> dict:
     return {
         # Data
-        "datasets": ["addbiomechanics"],  # which datasets to load
+        "datasets": [
+            "addbiomechanics",       # manual download: https://addbiomechanics.org  (priority 10)
+            "dvj_opensim_zenodo",    # auto: python scripts/download_datasets.py --auto (priority 9)
+            "cmj_grf_zenodo",        # auto: 663 CMJ trials, vGRF+ACC (priority 8)
+            "biocv",                 # manual download: C3D + force plates (priority 9)
+            "opencap",               # manual download: markerless OpenSim (priority 8)
+            "cod_ik_id_zenodo",      # auto: CoD IK+ID OpenSim results (priority 7)
+        ],  # which datasets to load
         "data_root": str(DATA_DIR / "public"),
         "movement_filter": ["cmj", "drop_jump", "squat_jump", "vertical_jump",
                             "running", "sprinting"],
@@ -121,6 +128,30 @@ def load_all_samples(config: dict) -> list:
                 for sample in load_opencap(
                     dataset_dir, movement_filter, max_subjects
                 ):
+                    samples.append(sample)
+
+            elif dataset_name == "cmj_grf_zenodo":
+                from src.data_pipeline.loaders.cmj_npz import load_cmj_npz_dir
+                for sample in load_cmj_npz_dir(dataset_dir, movement_filter, max_subjects):
+                    samples.append(sample)
+
+            elif dataset_name == "dvj_opensim_zenodo":
+                # Drop vertical jump dataset: C3D + OpenSim .trc/.mot files
+                # Try the C3D loader first; fall back to the OpenCap text loader
+                c3d_files = list(dataset_dir.rglob("*.c3d"))
+                if c3d_files:
+                    from src.data_pipeline.loaders.biocv import load_biocv
+                    for sample in load_biocv(dataset_dir, movement_filter, max_subjects):
+                        samples.append(sample)
+                else:
+                    from src.data_pipeline.loaders.opencap import load_opencap
+                    for sample in load_opencap(dataset_dir, movement_filter, max_subjects):
+                        samples.append(sample)
+
+            elif dataset_name == "cod_ik_id_zenodo":
+                # Change-of-direction IK+ID dataset: OpenSim .mot/.sto format
+                from src.data_pipeline.loaders.addbiomechanics import load_addbiomechanics
+                for sample in load_addbiomechanics(dataset_dir, movement_filter, max_subjects):
                     samples.append(sample)
 
             else:

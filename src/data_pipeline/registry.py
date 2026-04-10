@@ -175,6 +175,82 @@ DATASET_REGISTRY: dict[str, DatasetInfo] = {
         movement_types=["vertical_jump", "cmj"],
         priority=6,
     ),
+
+    # ── Zenodo auto-downloadable datasets (CC-BY-4.0) ──────────────────
+
+    "cmj_grf_zenodo": DatasetInfo(
+        name="cmj_grf_zenodo",
+        description=(
+            "Preprocessed triaxial accelerometer and vertical GRF from 663 CMJ "
+            "trials (67 participants). Python NumPy .npz format. Includes jump "
+            "height and peak power. White (2026). Zenodo 19136480."
+        ),
+        url="https://zenodo.org/records/19136480",
+        license="CC BY 4.0",
+        citation=(
+            "White, M. (2026). Preprocessed accelerometer and ground reaction "
+            "force data from countermovement jumps (Python format). Zenodo. "
+            "https://doi.org/10.5281/zenodo.19136480"
+        ),
+        has_kinematics=False,
+        has_dynamics=True,
+        has_grf=True,
+        file_formats=[".npz"],
+        n_subjects_approx=67,
+        n_hours_approx=0.5,
+        movement_types=["cmj"],
+        priority=8,
+    ),
+
+    "dvj_opensim_zenodo": DatasetInfo(
+        name="dvj_opensim_zenodo",
+        description=(
+            "Multimodal drop vertical jump dataset: whole-body kinematics, GRF, "
+            "and EMG from 28 participants. Provides C3D, OpenSim .trc/.mot, and "
+            "ASCII formats. Zang & Wu (2026). Zenodo 18503500."
+        ),
+        url="https://zenodo.org/records/18503500",
+        license="CC BY 4.0",
+        citation=(
+            "Zang, W., Wu, J. (2026). A multimodal biomechanics and EMG dataset "
+            "of drop vertical jump under virtual-reality visual height perturbations. "
+            "Zenodo. https://doi.org/10.5281/zenodo.18503500"
+        ),
+        has_kinematics=True,
+        has_dynamics=True,
+        has_grf=True,
+        file_formats=[".c3d", ".trc", ".mot"],
+        n_subjects_approx=28,
+        n_hours_approx=2,
+        movement_types=["drop_jump", "vertical_jump"],
+        priority=9,
+    ),
+
+    "cod_ik_id_zenodo": DatasetInfo(
+        name="cod_ik_id_zenodo",
+        description=(
+            "Optical motion capture data with IK, inverse dynamics and optimal "
+            "control results for 30 change-of-direction trials. Provides GRF + "
+            "full-body kinematics. Nitschke et al. (2022). Zenodo 6949012."
+        ),
+        url="https://zenodo.org/records/6949012",
+        license="CC BY 4.0",
+        citation=(
+            "Nitschke, M. et al. (2022). Optical motion capturing of change of "
+            "direction motions reconstructed with inverse kinematics and dynamics "
+            "and optimal control simulation. Zenodo. "
+            "https://doi.org/10.5281/zenodo.6949012"
+        ),
+        has_kinematics=True,
+        has_dynamics=True,
+        has_grf=True,
+        has_joint_torques=True,
+        file_formats=[".mot", ".sto", ".trc"],
+        n_subjects_approx=10,
+        n_hours_approx=0.5,
+        movement_types=["running", "sprinting", "other"],
+        priority=7,
+    ),
 }
 
 
