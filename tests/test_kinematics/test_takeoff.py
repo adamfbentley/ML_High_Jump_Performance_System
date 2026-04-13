@@ -211,11 +211,17 @@ def test_predict_max_com_height_physics():
 
 
 def test_compute_impulse_constant_force():
-    """Constant vertical force F over T seconds → impulse = F*T."""
+    """Constant vertical force F over T seconds → impulse ≈ F*T.
+
+    The trapezoidal rule integrates over N-1 intervals from N points, so the
+    result is F * (N-1)/fps rather than F * N/fps.  The boundary error is
+    exactly one time-step: F * dt = 700 * 0.01 = 7 N·s.
+    """
     fps = 100.0
     n = 100
     f = np.zeros((n, 3))
     f[:, 1] = 700.0  # 700 N vertical
     impulse = compute_impulse(f, fps, axis=1)
-    expected = 700.0 * (n / fps)
-    assert abs(impulse - expected) < 1.0   # within 1 N·s (trapz boundary effect)
+    # Trapezoidal integration: F * (N-1) * dt
+    expected = 700.0 * (n - 1) / fps
+    assert abs(impulse - expected) < 0.01   # floating-point tolerance only
