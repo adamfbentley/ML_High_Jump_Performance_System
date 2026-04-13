@@ -17,33 +17,73 @@ import torch.nn as nn
 
 @dataclass
 class TechniqueParameters:
-    """Controllable technique variables for optimization."""
+    """Controllable technique variables for optimization.
 
-    approach_speed_mps: float        # horizontal speed entering the curve
-    curve_radius_m: float            # radius of the J-approach curve
+    Fields are ordered to match to_tensor() / from_tensor() exactly.
+    Do NOT change field order without updating both methods simultaneously.
+
+    Athlete A's priority controllable variables (from athlete brief):
+      - ground_contact_time_takeoff_ms: takeoff-foot ground contact time
+      - body_alignment_deviation_deg:   deviation from straight-line body alignment
+      - foot_to_ground_angle_deg:       takeoff foot angle to the mat
+      - knee_drive_peak_speed_mps:      free-leg knee drive peak speed
+      - curve_start_step:               which stride number the J-curve begins
+    """
+
+    # ── Approach / curve ──────────────────────────────────────────────────
+    approach_speed_mps: float         # horizontal speed entering the curve
+    curve_radius_m: float             # radius of the J-approach curve
+
+    # ── Step lengths ──────────────────────────────────────────────────────
     penultimate_step_length_cm: float
     last_step_length_cm: float
-    plant_angle_deg: float           # angle of takeoff foot at plant
-    takeoff_knee_angle_deg: float    # knee angle at the instant of takeoff
+
+    # ── Plant / takeoff angles ────────────────────────────────────────────
+    # Plant angle: angle of takeoff leg (hip→foot vector) from horizontal at
+    # foot strike.  ~65–70° for elite Fosbury Floppers (Dapena 1980).
+    plant_angle_deg: float
+    takeoff_knee_angle_deg: float     # knee angle at the instant of takeoff
     takeoff_hip_angle_deg: float
-    arm_swing_timing_ms: float       # relative timing of arm drive
+
+    # ── Arm / free-leg drive ──────────────────────────────────────────────
+    arm_swing_timing_ms: float        # relative timing of arm drive
     free_leg_drive_angle_deg: float
 
+    # ── Athlete A priority fields ────────────────────────────────────────────
+    ground_contact_time_takeoff_ms: float = 120.0   # takeoff foot contact (ms)
+    body_alignment_deviation_deg: float = 0.0       # deviation from straight line (deg)
+    foot_to_ground_angle_deg: float = 65.0          # foot-to-mat angle at strike (deg)
+    knee_drive_peak_speed_mps: float = 3.0          # free-leg knee peak speed (m/s)
+    curve_start_step: int = 5                       # step index where curve begins
+
     def to_tensor(self) -> torch.Tensor:
+        """Encode all 14 technique parameters as a float32 tensor.
+
+        Ordering must exactly match from_tensor().
+        """
         return torch.tensor([
-            self.approach_speed_mps,
-            self.curve_radius_m,
-            self.penultimate_step_length_cm,
-            self.last_step_length_cm,
-            self.plant_angle_deg,
-            self.takeoff_knee_angle_deg,
-            self.takeoff_hip_angle_deg,
-            self.arm_swing_timing_ms,
-            self.free_leg_drive_angle_deg,
+            self.approach_speed_mps,           # [0]
+            self.curve_radius_m,               # [1]
+            self.penultimate_step_length_cm,   # [2]
+            self.last_step_length_cm,          # [3]
+            self.plant_angle_deg,              # [4]
+            self.takeoff_knee_angle_deg,       # [5]
+            self.takeoff_hip_angle_deg,        # [6]
+            self.arm_swing_timing_ms,          # [7]
+            self.free_leg_drive_angle_deg,     # [8]
+            self.ground_contact_time_takeoff_ms,  # [9]
+            self.body_alignment_deviation_deg,    # [10]
+            self.foot_to_ground_angle_deg,        # [11]
+            self.knee_drive_peak_speed_mps,       # [12]
+            float(self.curve_start_step),         # [13]
         ], dtype=torch.float32)
 
     @classmethod
     def from_tensor(cls, t: torch.Tensor) -> TechniqueParameters:
+        """Decode a 14-element float32 tensor back to TechniqueParameters.
+
+        Ordering must exactly match to_tensor().
+        """
         v = t.detach().cpu().numpy()
         return cls(
             approach_speed_mps=float(v[0]),
@@ -55,6 +95,11 @@ class TechniqueParameters:
             takeoff_hip_angle_deg=float(v[6]),
             arm_swing_timing_ms=float(v[7]),
             free_leg_drive_angle_deg=float(v[8]),
+            ground_contact_time_takeoff_ms=float(v[9]),
+            body_alignment_deviation_deg=float(v[10]),
+            foot_to_ground_angle_deg=float(v[11]),
+            knee_drive_peak_speed_mps=float(v[12]),
+            curve_start_step=int(round(float(v[13]))),
         )
 
 
@@ -155,10 +200,22 @@ def compute_sensitivity(
     height = _evaluate_height(pinn_model, params, anthropometrics)
     grads = torch.autograd.grad(height, params)[0]
 
+    # Must stay in sync with to_tensor() / from_tensor() ordering (14 params).
     param_names = [
-        "approach_speed", "curve_radius", "penultimate_step",
-        "last_step", "plant_angle", "knee_angle",
-        "hip_angle", "arm_timing", "free_leg_drive",
+        "approach_speed",           # [0]
+        "curve_radius",             # [1]
+        "penultimate_step",         # [2]
+        "last_step",                # [3]
+        "plant_angle",              # [4]
+        "takeoff_knee_angle",       # [5]
+        "takeoff_hip_angle",        # [6]
+        "arm_swing_timing",         # [7]
+        "free_leg_drive",           # [8]
+        "ground_contact_time_takeoff",  # [9]
+        "body_alignment_deviation",     # [10]
+        "foot_to_ground_angle",         # [11]
+        "knee_drive_peak_speed",        # [12]
+        "curve_start_step",             # [13]
     ]
     grad_vals = grads.detach().cpu().numpy()
     max_abs = np.abs(grad_vals).max() + 1e-8
