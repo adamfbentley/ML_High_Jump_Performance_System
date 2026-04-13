@@ -8,6 +8,12 @@ tools:
   - grep_search
 ---
 
+## Source of truth
+
+- Use `.github/copilot-instructions.md` as the technical source of truth for architecture, physics conventions, data structures, datasets, and code conventions.
+- Use `imogens_response- to-questions/Highjumpproject.html` as athlete-domain guidance for the phase breakdown, movement priorities, and coach-facing outputs the system should produce.
+- If they conflict on implementation details, follow `.github/copilot-instructions.md` and flag the mismatch instead of guessing.
+
 Process a high jump video through the full analysis pipeline.
 
 ## Required inputs (ask the user if not provided)

@@ -23,7 +23,7 @@ class TechniqueParameters:
     curve_radius_m: float            # radius of the J-approach curve
     penultimate_step_length_cm: float
     last_step_length_cm: float
-    plant_angle_deg: float           # angle of takeoff foot at plant
+    plant_angle_deg: float           # takeoff leg angle at foot strike: angle of the leg (hip→foot vector) from horizontal, sagittal plane. ~65–70° for elite Fosbury Floppers (Dapena 1980). More upright = more velocity lost to braking.
     takeoff_knee_angle_deg: float    # knee angle at the instant of takeoff
     takeoff_hip_angle_deg: float
     arm_swing_timing_ms: float       # relative timing of arm drive
