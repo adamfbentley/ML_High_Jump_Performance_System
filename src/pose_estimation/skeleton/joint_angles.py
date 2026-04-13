@@ -78,8 +78,8 @@ def compute_hip_abduction_angle(
     # Signed angle from downward Y-axis (−Y) toward ±Z in the frontal plane.
     # arctan2(tz, −ty):
     #   thigh straight down [ty=−1, tz=0]  → arctan2(0, 1)  =   0° ✓
-    #   thigh full left     [ty=0,  tz=+1] → arctan2(1, 0)  =  90° (abduction left)
-    #   thigh full right    [ty=0,  tz=−1] → arctan2(−1, 0) = −90° (adduction left)
+    #   thigh full left     [ty=0,  tz=+1] → arctan2(1, 0)  =  90° (abduction left,  before flip)
+    #   thigh full right    [ty=0,  tz=−1] → arctan2(−1, 0) = −90° (abduction right, before sign flip)
     angle_deg = float(np.degrees(np.arctan2(tz, -ty)))
 
     # For the right leg, abduction is toward −Z, so flip sign.

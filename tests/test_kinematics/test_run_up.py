@@ -20,6 +20,7 @@ from src.kinematics.run_up_analysis import (
     compute_acceleration_rhythm,
     classify_foot_contact,
     compute_per_stride_curve_deviation,
+    compute_arm_lateral_swing,
 )
 
 
@@ -212,6 +213,7 @@ def test_runup_metrics_construction_with_defaults():
     assert m.foot_contact_labels == []
     assert m.curve_start_step is None
     assert m.per_stride_curve_deviation_cm == []
+    assert m.per_stride_arm_lateral_swing_cm == []
 
 
 def test_runup_metrics_construction_with_all_fields():
@@ -270,3 +272,41 @@ def test_fit_curve_radius_perfect_circle():
 def test_fit_curve_radius_too_few_points():
     points = np.random.randn(3, 2)
     assert fit_curve_radius(points) is None
+
+
+# ── compute_arm_lateral_swing ─────────────────────────────────────────────
+
+def test_arm_lateral_swing_no_swing():
+    """Wrist and shoulder at same Z → 0 cm swing."""
+    n = 20
+    wrist = np.zeros((n, 3))
+    shoulder = np.zeros((n, 3))
+    contacts = [(0, n - 1)]
+    result = compute_arm_lateral_swing(wrist, shoulder, contacts)
+    assert len(result) == 1
+    assert result[0] == pytest.approx(0.0)
+
+
+def test_arm_lateral_swing_constant_offset():
+    """Wrist always 0.15 m to the side of shoulder → 15 cm."""
+    n = 20
+    wrist = np.zeros((n, 3))
+    wrist[:, 2] = 0.15          # 15 cm outward in Z
+    shoulder = np.zeros((n, 3))
+    contacts = [(0, n - 1)]
+    result = compute_arm_lateral_swing(wrist, shoulder, contacts)
+    assert result[0] == pytest.approx(15.0)
+
+
+def test_arm_lateral_swing_per_stride():
+    """Two strides, different swing magnitudes."""
+    n = 40
+    wrist = np.zeros((n, 3))
+    wrist[:20, 2] = 0.10   # first stride: 10 cm
+    wrist[20:, 2] = 0.25   # second stride: 25 cm
+    shoulder = np.zeros((n, 3))
+    contacts = [(0, 19), (20, 39)]
+    result = compute_arm_lateral_swing(wrist, shoulder, contacts)
+    assert len(result) == 2
+    assert result[0] == pytest.approx(10.0)
+    assert result[1] == pytest.approx(25.0)

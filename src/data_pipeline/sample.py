@@ -53,11 +53,11 @@ MOVEMENT_RELEVANCE = {
     MovementType.DROP_JUMP: 0.94,
     MovementType.COUNTERMOVEMENT_JUMP: 0.82,
     MovementType.VERTICAL_JUMP: 0.80,
+    MovementType.SQUAT_JUMP: 0.75,
     MovementType.SPRINTING: 0.70,
     MovementType.RUNNING: 0.60,
     MovementType.HOPPING: 0.50,
     MovementType.WALKING: 0.30,
-    MovementType.SQUAT_JUMP: 0.75,
     MovementType.OTHER: 0.20,
 }
 
