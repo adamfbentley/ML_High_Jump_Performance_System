@@ -102,9 +102,32 @@ class DynamicsDataset(Dataset):
     def _add_com_windows(
         self, sample: BiomechanicalSample, window_size: int, stride: int
     ) -> None:
-        """Extract windows from a sample with only CoM + GRF data."""
+        """Extract windows from a sample with only CoM + GRF data.
+
+        When com_position / com_velocity are unavailable (e.g. the CMJ
+        Zenodo dataset provides only GRF and derived com_acceleration),
+        they are reconstructed by Euler integration of com_acceleration.
+        Initial conditions are zero (relative coordinates), which is fine
+        for the PINN — it learns force–motion *shapes*, not absolute
+        positions.
+        """
         n_frames = sample.n_frames
         mass = sample.subject.body_mass_kg or 75.0
+
+        # ── Derive missing kinematics from com_acceleration ────────────
+        com_pos = sample.com_position
+        com_vel = sample.com_velocity
+
+        if (com_pos is None or com_vel is None) and sample.com_acceleration is not None:
+            dt = 1.0 / sample.fps if sample.fps > 0 else 1.0 / 250.0
+            acc = sample.com_acceleration.astype(np.float64)
+            if com_vel is None:
+                com_vel = np.cumsum(acc * dt, axis=0).astype(np.float32)
+            if com_pos is None:
+                com_pos = np.cumsum(com_vel.astype(np.float64) * dt, axis=0).astype(np.float32)
+
+        if com_pos is None:
+            return  # nothing to build input from
 
         for start in range(0, n_frames - window_size + 1, stride):
             end = start + window_size
@@ -112,8 +135,8 @@ class DynamicsDataset(Dataset):
 
             input_data = np.concatenate([
                 t[:, None],
-                sample.com_position[start:end].astype(np.float32),
-                sample.com_velocity[start:end].astype(np.float32) if sample.com_velocity is not None else np.zeros((window_size, 3), dtype=np.float32),
+                com_pos[start:end].astype(np.float32),
+                com_vel[start:end].astype(np.float32) if com_vel is not None else np.zeros((window_size, 3), dtype=np.float32),
             ], axis=1)
 
             window = {
