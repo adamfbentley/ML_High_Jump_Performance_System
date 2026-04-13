@@ -21,6 +21,12 @@ from dataclasses import dataclass
 
 import numpy as np
 
+# numpy 2.0 renamed trapz → trapezoid; support both.
+try:
+    _trapz = np.trapezoid  # type: ignore[attr-defined]
+except AttributeError:
+    _trapz = np.trapz  # type: ignore[attr-defined]
+
 
 @dataclass
 class TakeoffMetrics:
@@ -144,7 +150,7 @@ def compute_impulse(
         Impulse in Newton-seconds.
     """
     dt = 1.0 / fps
-    return float(np.trapz(force[:, axis], dx=dt))
+    return float(_trapz(force[:, axis], dx=dt))
 
 
 def compute_body_alignment_deviation(

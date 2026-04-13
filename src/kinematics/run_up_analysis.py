@@ -92,6 +92,13 @@ class RunUpMetrics:
     # For each stride during the curve phase, the lateral distance (cm) from
     # the ideal arc described by curve_radius_m and curve centre.
 
+    # ── Per-stride arm lateral swing (Imogen priority) ────────────────────
+    per_stride_arm_lateral_swing_cm: list[float] = field(default_factory=list)
+    # Maximum lateral (Z-axis) displacement of the wrist from the ipsilateral
+    # shoulder's Z position during each stride's ground-contact window.
+    # Imogen: "I have a habit of swinging my arm out to the side which can
+    # throw off my body position."  Positive = arm swings outward laterally.
+
 
 def detect_ground_contacts(
     ankle_positions: np.ndarray,
@@ -216,9 +223,10 @@ def compute_foot_strike_under_hip(
     for start, _end in contacts:
         foot_xz = foot_positions[start, [0, 2]]  # XZ at contact moment
         hip_xz = hip_positions[start, [0, 2]]
-        # Signed projection: positive when foot is further along X (forward)
+        # Signed projection: positive when foot is further along X (forward direction).
+        # Sign is derived solely from the X-component (forward/backward axis).
         diff = foot_xz - hip_xz
-        sign = np.sign(diff[0]) if abs(diff[0]) > abs(diff[1]) else np.sign(diff[1])
+        sign = np.sign(diff[0]) if diff[0] != 0.0 else 1.0
         offset_m = sign * float(np.linalg.norm(diff))
         offsets_cm.append(offset_m * 100.0)
     return offsets_cm
@@ -317,3 +325,35 @@ def compute_per_stride_curve_deviation(
         deviation_m = abs(dist_to_center - curve_radius_m)
         deviations_cm.append(deviation_m * 100.0)
     return deviations_cm
+
+
+def compute_arm_lateral_swing(
+    wrist_positions: np.ndarray,
+    shoulder_positions: np.ndarray,
+    contacts: list[tuple[int, int]],
+) -> list[float]:
+    """Compute per-stride maximum lateral arm swing relative to the shoulder.
+
+    Measures how far the wrist deviates laterally (Z-axis) from the ipsilateral
+    shoulder's Z position during each ground-contact window.  A large positive
+    value means the arm is swinging out to the side rather than driving forward.
+
+    Imogen: "I have a habit of swinging my arm out to the side which can throw
+    off my body position."
+
+    Args:
+        wrist_positions:    (T, 3) ipsilateral wrist position trajectory.
+        shoulder_positions: (T, 3) ipsilateral shoulder position trajectory.
+        contacts:           List of (start_frame, end_frame) contact intervals.
+
+    Returns:
+        List of maximum lateral wrist-to-shoulder Z-offsets in centimetres,
+        one per contact.  Positive = arm swings outward from the body midline.
+    """
+    swings_cm = []
+    for start, end in contacts:
+        wrist_z = wrist_positions[start:end + 1, 2]
+        shoulder_z = shoulder_positions[start:end + 1, 2]
+        lateral_offset = np.abs(wrist_z - shoulder_z)
+        swings_cm.append(float(np.max(lateral_offset)) * 100.0)
+    return swings_cm
