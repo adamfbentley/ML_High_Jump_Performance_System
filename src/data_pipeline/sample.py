@@ -19,6 +19,7 @@ class MovementType(Enum):
 
     COUNTERMOVEMENT_JUMP = "cmj"
     DROP_JUMP = "drop_jump"
+    SINGLE_LEG_DROP_JUMP = "single_leg_drop_jump"  # Athlete A: "most accurate to HJ"
     SQUAT_JUMP = "squat_jump"
     VERTICAL_JUMP = "vertical_jump"
     RUNNING = "running"
@@ -29,18 +30,35 @@ class MovementType(Enum):
     OTHER = "other"
 
 
-# How relevant each movement type is for high jump pre-training (0→1)
+# How relevant each movement type is for high jump pre-training (0→1).
+#
+# Ranking updated to reflect Athlete A's athlete brief (Q3):
+#   "No CMJ not most accurate to HJ.  Box drop jump, particularly a single
+#    leg one would be the most accurate and this is what we test."
+#
+# Hierarchy:
+#   HIGH_JUMP                     = 1.00  (target sport)
+#   SINGLE_LEG_DROP_JUMP          = 0.97  (most similar to HJ takeoff per Athlete A)
+#   DROP_JUMP (box drop jump)     = 0.94  (closer to HJ than CMJ)
+#   COUNTERMOVEMENT_JUMP          = 0.82  (less HJ-specific per Athlete A)
+#   VERTICAL_JUMP                 = 0.80
+#   SPRINTING                     = 0.70  (run-up speed transfer)
+#   RUNNING                       = 0.60
+#   HOPPING                       = 0.50
+#   WALKING                       = 0.30
+#   OTHER                         = 0.20
 MOVEMENT_RELEVANCE = {
-    MovementType.HIGH_JUMP: 1.0,
-    MovementType.COUNTERMOVEMENT_JUMP: 0.9,
-    MovementType.DROP_JUMP: 0.85,
-    MovementType.SQUAT_JUMP: 0.8,
-    MovementType.VERTICAL_JUMP: 0.8,
-    MovementType.SPRINTING: 0.7,
-    MovementType.RUNNING: 0.6,
-    MovementType.HOPPING: 0.5,
-    MovementType.WALKING: 0.3,
-    MovementType.OTHER: 0.2,
+    MovementType.HIGH_JUMP: 1.00,
+    MovementType.SINGLE_LEG_DROP_JUMP: 0.97,
+    MovementType.DROP_JUMP: 0.94,
+    MovementType.COUNTERMOVEMENT_JUMP: 0.82,
+    MovementType.VERTICAL_JUMP: 0.80,
+    MovementType.SPRINTING: 0.70,
+    MovementType.RUNNING: 0.60,
+    MovementType.HOPPING: 0.50,
+    MovementType.WALKING: 0.30,
+    MovementType.SQUAT_JUMP: 0.75,
+    MovementType.OTHER: 0.20,
 }
 
 
@@ -60,6 +78,38 @@ class SubjectInfo:
     trunk_length_m: Optional[float] = None
     upper_arm_length_m: Optional[float] = None
     forearm_length_m: Optional[float] = None
+
+
+@dataclass
+class SessionContext:
+    """Session-level contextual factors that may modulate performance.
+
+    Athlete A identified several modulating factors (Q6 / Q7 of athlete brief):
+      - Fatigue within a session (jump number)
+      - Fatigue from prior training days
+      - General wellbeing / sleep (trackable via HRV)
+      - Weather / environmental conditions
+
+    These are optional; populate what is available.
+    """
+
+    # Within-session fatigue proxy
+    jump_number_in_session: Optional[int] = None    # 1 = first jump of the session
+    rest_time_before_jump_s: Optional[float] = None  # seconds since last jump
+
+    # Physiological state (from wearable or self-report)
+    heart_rate_bpm: Optional[float] = None
+    heart_rate_variability_ms: Optional[float] = None  # RMSSD or similar
+
+    # Multi-day load
+    days_since_last_training: Optional[int] = None
+
+    # Self-reported / subjective
+    subjective_fatigue_1_10: Optional[float] = None  # 1 = fresh, 10 = exhausted
+
+    # Environmental
+    temperature_c: Optional[float] = None
+    wind_speed_mps: Optional[float] = None
 
 
 @dataclass
@@ -110,6 +160,9 @@ class BiomechanicalSample:
     # Video frame paths (if available)
     frame_paths: list[str] = field(default_factory=list)
 
+    # ── Session context ───────────────────────────────────────
+    session_context: Optional[SessionContext] = None
+
     @property
     def n_frames(self) -> int:
         """Number of time frames in the sample."""
@@ -156,6 +209,7 @@ class BiomechanicalSample:
             joint_names=self.joint_names,
             marker_names=self.marker_names,
             pose_landmark_names=self.pose_landmark_names,
+            session_context=self.session_context,
         )
         for attr in [
             "joint_angles", "joint_angular_velocities", "joint_angular_accelerations",
