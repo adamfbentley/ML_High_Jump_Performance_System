@@ -37,13 +37,22 @@ data/bvh/*
 data/parameters/*
 data/models/population/*
 data/models/personal/*
+data/models/mediapipe/*
 data/calibration/*
 data/public/*
+data/High Jump Videos/
 !data/**/.gitkeep
+
+# ---- Analysis results (generated, can be reproduced) ----
+data/results/
 
 # ---- Experiment outputs ----
 experiments/results/*
 !experiments/results/.gitkeep
+
+# ---- OpenSim temp artifacts ----
+opensim.log
+_ik_marker_errors.sto
 
 # ---- Notebook checkpoints ----
 .ipynb_checkpoints/
@@ -57,6 +66,10 @@ notebooks/*.html
 wandb/
 mlruns/
 lightning_logs/
+
+# ---- Scratch / backup scripts ----
+scripts/*_backup.py
+scripts/quick_check.py
 
 # ---- Environment ----
 .env
