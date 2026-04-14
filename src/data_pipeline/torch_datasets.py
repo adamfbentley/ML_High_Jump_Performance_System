@@ -42,13 +42,13 @@ class DynamicsDataset(Dataset):
         self.windows: list[dict[str, np.ndarray]] = []
 
         for sample in samples:
-            if not sample.has_dynamics or not sample.has_kinematics:
-                # Use whatever data is available for CoM-based dynamics
-                if sample.com_acceleration is not None and sample.grf is not None:
-                    self._add_com_windows(sample, window_size, stride)
-                continue
-
-            self._add_full_dynamics_windows(sample, window_size, stride)
+            # Always prefer the CoM-based path for consistent input dims
+            # across datasets. Full dynamics path creates variable-width
+            # inputs (depends on number of joints) which can't be batched.
+            if sample.com_acceleration is not None and sample.grf is not None:
+                self._add_com_windows(sample, window_size, stride)
+            elif sample.has_dynamics and sample.has_kinematics:
+                self._add_full_dynamics_windows(sample, window_size, stride)
 
     def _add_full_dynamics_windows(
         self, sample: BiomechanicalSample, window_size: int, stride: int
