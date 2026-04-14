@@ -34,6 +34,11 @@ from src.kinematics.takeoff_analysis import (
     compute_takeoff_angle,
     estimate_grf_from_com,
 )
+from src.pose_estimation.skeleton.landmark_postprocessor import (
+    PostProcessorConfig,
+    postprocess_landmarks,
+)
+from src.pose_estimation.opensim_ik import is_opensim_available, run_opensim_ik
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
@@ -178,6 +183,8 @@ def build_sample(
     fps: float,
     body_mass_kg: float,
     height_m: float,
+    opensim_joint_angles: np.ndarray | None = None,
+    opensim_joint_names: list[str] | None = None,
 ) -> BiomechanicalSample:
     """Package everything into the canonical data format."""
     subject = SubjectInfo(
@@ -186,15 +193,23 @@ def build_sample(
         height_m=height_m,
     )
 
+    # Prefer OpenSim IK joint angles when available
+    if opensim_joint_angles is not None:
+        joint_angles = opensim_joint_angles
+        joint_names = opensim_joint_names or []
+    else:
+        joint_angles = kinematics["joint_angles_rad"]
+        joint_names = kinematics["joint_names"]
+
     return BiomechanicalSample(
         dataset_name="personal_video",
         trial_id=video_path.stem,
         subject=subject,
         movement_type=MovementType.HIGH_JUMP,
         fps=fps,
-        joint_angles=kinematics["joint_angles_rad"],
+        joint_angles=joint_angles,
         joint_angular_velocities=kinematics["joint_angular_velocities"],
-        joint_names=kinematics["joint_names"],
+        joint_names=joint_names,
         com_position=kinematics["com_position"],
         com_velocity=kinematics["com_velocity"],
         com_acceleration=kinematics["com_acceleration"],
@@ -358,12 +373,46 @@ def analyze_video(
     # 1. Pose estimation
     landmarks_3d, fps = extract_poses(video_path)
 
+    # 1b. Post-process landmarks (gap fill → Butterworth filter → segment length)
+    pp_config = PostProcessorConfig(
+        do_gap_fill=True,
+        do_filter=True,
+        filter_cutoff_hz=10.0,      # 10 Hz — appropriate for jumping movements
+        do_segment_enforce=True,
+        height_m=height_m,
+        segment_enforce_weight=0.8,
+    )
+    landmarks_3d = postprocess_landmarks(landmarks_3d, fps, pp_config)
+    logger.info(
+        f"  Post-processing: gap-fill + {pp_config.filter_cutoff_hz:.0f} Hz "
+        f"Butterworth + segment enforcement (h={height_m:.2f}m)"
+    )
+
+    # 1c. OpenSim IK (optional — requires conda opensim_ik env + model file)
+    opensim_joint_angles = None
+    opensim_joint_names = None
+    if is_opensim_available():
+        try:
+            opensim_joint_angles, opensim_joint_names = run_opensim_ik(
+                landmarks_3d, fps, height_m=height_m, mass_kg=body_mass_kg,
+            )
+            logger.info(
+                f"  OpenSim IK: {opensim_joint_angles.shape[1]} coordinates, "
+                f"{opensim_joint_angles.shape[0]} frames"
+            )
+        except Exception as e:
+            logger.warning(f"  OpenSim IK failed, using geometric angles: {e}")
+    else:
+        logger.info("  OpenSim IK: not available (using geometric joint angles)")
+
     # 2. Kinematics
     kinematics = compute_kinematics(landmarks_3d, fps, body_mass_kg)
 
     # 3. Build BiomechanicalSample
     sample = build_sample(
         video_path, landmarks_3d, kinematics, fps, body_mass_kg, height_m,
+        opensim_joint_angles=opensim_joint_angles,
+        opensim_joint_names=opensim_joint_names,
     )
     logger.info(
         f"  BiomechanicalSample: {sample.n_frames} frames, "
