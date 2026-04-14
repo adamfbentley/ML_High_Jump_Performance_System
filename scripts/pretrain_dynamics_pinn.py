@@ -136,22 +136,15 @@ def load_all_samples(config: dict) -> list:
                     samples.append(sample)
 
             elif dataset_name == "dvj_opensim_zenodo":
-                # Drop vertical jump dataset: C3D + OpenSim .trc/.mot files
-                # Try the C3D loader first; fall back to the OpenCap text loader
-                c3d_files = list(dataset_dir.rglob("*.c3d"))
-                if c3d_files:
-                    from src.data_pipeline.loaders.biocv import load_biocv
-                    for sample in load_biocv(dataset_dir, movement_filter, max_subjects):
-                        samples.append(sample)
-                else:
-                    from src.data_pipeline.loaders.opencap import load_opencap
-                    for sample in load_opencap(dataset_dir, movement_filter, max_subjects):
-                        samples.append(sample)
+                # Drop vertical jump dataset: OpenSim .trc + .mot (markers + GRF)
+                from src.data_pipeline.loaders.dvj_zenodo import load_dvj_zenodo
+                for sample in load_dvj_zenodo(dataset_dir, movement_filter, max_subjects):
+                    samples.append(sample)
 
             elif dataset_name == "cod_ik_id_zenodo":
-                # Change-of-direction IK+ID dataset: OpenSim .mot/.sto format
-                from src.data_pipeline.loaders.addbiomechanics import load_addbiomechanics
-                for sample in load_addbiomechanics(dataset_dir, movement_filter, max_subjects):
+                # Change-of-direction IK+ID dataset: Nitschke et al. (2022)
+                from src.data_pipeline.loaders.cod_zenodo import load_cod_zenodo
+                for sample in load_cod_zenodo(dataset_dir, movement_filter, max_subjects):
                     samples.append(sample)
 
             else:
@@ -290,9 +283,34 @@ def train(config: dict):
 
     best_loss = float("inf")
     loss_history = []
+    start_epoch = 0
+
+    # -- Resume from checkpoint --
+    resume_path = None
+    if config.get("checkpoint"):
+        resume_path = Path(config["checkpoint"])
+    elif config.get("resume") and (save_dir / "best_model.pth").exists():
+        resume_path = save_dir / "best_model.pth"
+
+    if resume_path and resume_path.exists():
+        logger.info(f"Resuming from {resume_path}...")
+        ckpt = torch.load(resume_path, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"])
+        # Only load optimizer if its state matches current model's params
+        try:
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        except Exception as e:
+            logger.warning(f"Could not load optimizer state: {e}. Starting with fresh optimizer.")
+
+        start_epoch = ckpt.get("epoch", 0) + 1
+        best_loss = ckpt.get("best_loss", float("inf"))
+        if "loss_history" in ckpt:
+            loss_history = ckpt["loss_history"]
+        logger.info(f"  Resuming at epoch {start_epoch} with best_loss {best_loss:.6f}")
+
     start_time = time.time()
 
-    for epoch in range(config["epochs"]):
+    for epoch in range(start_epoch, config["epochs"]):
         model.train()
         epoch_data_loss = 0.0
         epoch_physics_loss = 0.0
@@ -460,6 +478,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--model-type", choices=["inverse_dynamics", "projectile"], default=None)
     parser.add_argument("--max-subjects", type=int, default=None)
+    parser.add_argument("--resume", action="store_true", help="Resume from best_model.pth if it exists")
+    parser.add_argument("--checkpoint", type=str, default=None, help="Specific checkpoint path to resume from")
     return parser.parse_args()
 
 
@@ -488,6 +508,10 @@ def main():
         config["model_type"] = args.model_type
     if args.max_subjects:
         config["max_subjects"] = args.max_subjects
+    if args.resume:
+        config["resume"] = True
+    if args.checkpoint:
+        config["checkpoint"] = args.checkpoint
 
     logger.info("=== Dynamics PINN Pre-Training ===")
     logger.info(f"Config: {config}\n")
