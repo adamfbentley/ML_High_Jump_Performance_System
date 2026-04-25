@@ -39,6 +39,7 @@ from src.pose_estimation.skeleton.landmark_postprocessor import (
     postprocess_landmarks,
 )
 from src.pose_estimation.opensim_ik import is_opensim_available, run_opensim_ik
+from src.pose_estimation.scale_calibration import calibrate_landmarks_to_world
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
@@ -82,12 +83,15 @@ def collect_videos(input_path: Path) -> list[Path]:
 # ── Pose Extraction ───────────────────────────────────────────────────
 
 
-def extract_poses(video_path: Path) -> tuple[np.ndarray, float]:
-    """Run MediaPipe BlazePose on a video and return 3D landmarks.
+def extract_poses(video_path: Path) -> tuple[np.ndarray, np.ndarray, float, int, int]:
+    """Run MediaPipe BlazePose on a video and return 2D + 3D landmarks.
 
     Returns:
-        landmarks_3d: (T, 33, 4) array (x, y, z, visibility).
+        landmarks_2d: (T, 33, 3) normalised 2D landmarks (x, y, visibility).
+        landmarks_3d: (T, 33, 4) world landmarks (x, y, z, visibility).
         fps: Video frame rate.
+        width: Video frame width in pixels.
+        height: Video frame height in pixels.
     """
     estimator = MediaPipeEstimator(model_complexity=2)
     sequence = estimator.process_video(video_path)
@@ -96,20 +100,37 @@ def extract_poses(video_path: Path) -> tuple[np.ndarray, float]:
         raise ValueError(f"No poses detected in {video_path}")
 
     valid = sum(1 for f in sequence.frames if f.is_valid)
+
+    # Get video resolution for aspect ratio correction
+    import cv2
+    cap = cv2.VideoCapture(str(video_path))
+    vid_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    vid_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
+
     logger.info(
         f"  Pose estimation: {len(sequence.frames)} frames, "
-        f"{valid} valid ({100 * valid / len(sequence.frames):.0f}%)"
+        f"{valid} valid ({100 * valid / len(sequence.frames):.0f}%), "
+        f"resolution={vid_width}x{vid_height}"
     )
+
+    # Always stack 2D normalised landmarks
+    landmarks_2d = np.stack([f.landmarks_2d for f in sequence.frames])  # (T, 33, 3)
 
     # Stack 3D world landmarks; fall back to 2D if no 3D available
     has_3d = all(f.landmarks_3d is not None for f in sequence.frames)
     if has_3d:
-        landmarks = np.stack([f.landmarks_3d for f in sequence.frames])  # (T, 33, 4)
+        landmarks_3d = np.stack([f.landmarks_3d for f in sequence.frames])  # (T, 33, 4)
     else:
         logger.warning("  No 3D landmarks available — using 2D (depth will be approximate)")
-        landmarks = np.stack([f.landmarks_2d for f in sequence.frames])  # (T, 33, 3)
+        # Create (T, 33, 4) with z=0
+        landmarks_3d = np.zeros(
+            (landmarks_2d.shape[0], landmarks_2d.shape[1], 4), dtype=np.float32
+        )
+        landmarks_3d[:, :, :2] = landmarks_2d[:, :, :2]
+        landmarks_3d[:, :, 3] = landmarks_2d[:, :, 2]
 
-    return landmarks, sequence.fps
+    return landmarks_2d, landmarks_3d, sequence.fps, vid_width, vid_height
 
 
 # ── Kinematics ─────────────────────────────────────────────────────────
@@ -278,7 +299,11 @@ def run_pinn_inference(
 # ── Summary Report ─────────────────────────────────────────────────────
 
 
-def generate_report(sample: BiomechanicalSample, pinn_grf: np.ndarray | None) -> dict:
+def generate_report(
+    sample: BiomechanicalSample,
+    pinn_grf: np.ndarray | None,
+    bar_height_m: float | None = None,
+) -> dict:
     """Generate a summary report of the jump analysis."""
     mass = sample.subject.body_mass_kg
     g = 9.81
@@ -355,6 +380,20 @@ def generate_report(sample: BiomechanicalSample, pinn_grf: np.ndarray | None) ->
         **pinn_metrics,
     }
 
+    # Bar-height-relative metrics (when bar height is known)
+    if bar_height_m is not None:
+        report["bar_height_m"] = bar_height_m
+        # CoM clearance: how far below/above bar the peak CoM reached
+        # For Fosbury Flop, CoM typically passes 5–20 cm below the bar
+        com_bar_diff = peak_com_height - bar_height_m
+        report["com"]["com_minus_bar_m"] = round(com_bar_diff, 3)
+        report["com"]["com_below_bar"] = com_bar_diff < 0
+        logger.info(
+            f"  Bar at {bar_height_m:.2f}m, peak CoM at {peak_com_height:.2f}m "
+            f"({'below' if com_bar_diff < 0 else 'above'} bar by "
+            f"{abs(com_bar_diff):.2f}m)"
+        )
+
     return report
 
 
@@ -370,8 +409,19 @@ def analyze_video(
     """Run the full analysis pipeline on a single video."""
     logger.info(f"=== Analyzing: {video_path.name} ===")
 
-    # 1. Pose estimation
-    landmarks_3d, fps = extract_poses(video_path)
+    # 1. Pose estimation (2D normalised + 3D world)
+    landmarks_2d, landmarks_3d_world, fps, vid_w, vid_h = extract_poses(video_path)
+
+    # 1a. Scale calibration: use athlete height to convert pixel coords → metres
+    landmarks_3d = calibrate_landmarks_to_world(
+        landmarks_2d, landmarks_3d_world, height_m,
+        image_width=vid_w, image_height=vid_h,
+    )
+    logger.info(
+        f"  Scale calibration applied: athlete height = {height_m:.2f}m, "
+        f"CoM Y range = {landmarks_3d[:, :, 1].min():.2f}–"
+        f"{landmarks_3d[:, :, 1].max():.2f} m"
+    )
 
     # 1b. Post-process landmarks (gap fill → Butterworth filter → segment length)
     pp_config = PostProcessorConfig(
@@ -426,13 +476,11 @@ def analyze_video(
         pinn_grf = run_pinn_inference(sample, model_path)
 
     # 5. Generate report
-    report = generate_report(sample, pinn_grf)
+    bar_height = parse_bar_height(video_path.name)
+    report = generate_report(sample, pinn_grf, bar_height_m=bar_height)
 
     # 6. Add session metadata
-    bar_height = parse_bar_height(video_path.name)
     session_date = parse_session_date(video_path)
-    if bar_height is not None:
-        report["bar_height_m"] = bar_height
     if session_date is not None:
         report["session_date"] = session_date
     report["session_folder"] = video_path.parent.name
