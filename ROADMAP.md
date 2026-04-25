@@ -177,7 +177,34 @@ Complete rewrite of the optimisation engine (from scaffold to 664 lines):
 
 ---
 
-## Current State (April 2026)
+## Phase 9 — Onboarding Audit and Takeoff-Detection Fix (25 April 2026)
+
+A new Claude onboarding pass audited the working tree against the committed state, fixed a regression in the optimisation engine, and resolved a systemic takeoff-detection failure that was affecting **all** 45 reports (not just ~5 as previously believed).
+
+### Working-tree drift restored
+
+- `src/optimization/optimizer.py` was found locally reverted to the pre-Phase-5 9-parameter stub (215 lines, old `optimize_technique(pinn_model, ...)` signature). This caused `tests/test_optimization/test_optimizer.py` to fail at collection (missing `GRAVITY`, `predict_bar_clearance`, `extract_params_from_report`, `generate_coaching_cues`, `_estimate_takeoff_com_height`, `_impulse_model_vertical_velocity`, `_evaluate_height_differentiable`) and broke `scripts/optimize_jump.py`.
+- Restored to the committed 706-line version via `git checkout HEAD -- src/optimization/optimizer.py`. Test suite now reports the expected **174 passing**; without the restore it was 149 passing + 25 collection errors.
+
+### Local YAML tweaks retained
+
+- `experiments/configs/pretrain_dynamics.yaml` working-tree changes preserved as the active configuration: `dvj_opensim_zenodo` re-enabled (the cache it requires is now built) and `log_interval` changed from 1 → 50 (less verbose; appropriate after initial debugging).
+
+### Takeoff-detection bug fixed
+
+- Root cause located in `scripts/analyze_jump_video.py:329-345`: the frame-selection logic used `np.diff(np.sign(vy)) > 0` and took the *last* upward zero-crossing of vertical CoM velocity. In a jump trajectory this catches the **landing rebound** rather than the takeoff impulse (whose signature is `vy` at its peak just before gravity-driven decline).
+- Replaced with `takeoff_frame = int(np.argmax(vy))`. Newton's 2nd law guarantees `vy` decreases monotonically once the foot leaves the ground (only force acting is gravity), so peak `vy` IS the takeoff instant.
+- Smoke-tested on `14_02_26_one_1.79.mp4`: previously reported `takeoff_angle_deg=-2.8°, takeoff_vertical_mps=-0.01`; post-fix `takeoff_angle_deg=49.0°, takeoff_vertical_mps=3.72` (takeoff vertical velocity now physically plausible for an elite female jumper attempting 1.79 m).
+- All 45 jump videos re-processed end-to-end through `scripts/analyze_jump_video.py "data/High Jump Videos"`; per-session JSONs in `data/results/` and the `all_sessions_report.json` summary regenerated.
+
+### Onboarding-doc inaccuracies surfaced
+
+- `CLAUDE_ONBOARDING.md` claims "5 clips" of takeoff detection failure; actual count was **45/45**.
+- `CLAUDE_ONBOARDING.md` lists optimal Fosbury Flop takeoff angle as ~20–24° (Dapena 1980); peer-reviewed values are nearer 38–48°. Not changed in this pass — flagged for review with the BMS PhD student.
+
+---
+
+## Current State (25 April 2026)
 
 | Area | Status |
 |---|---|
@@ -188,13 +215,13 @@ Complete rewrite of the optimisation engine (from scaffold to 664 lines):
 | GNN skeleton coupling | ✅ Complete |
 | Dataset loaders (CMJ, CoD, DVJ, AddBiomechanics, BioCV, OpenCap) | ✅ Complete |
 | Differentiable optimiser + sensitivity analysis | ✅ Complete and tested |
-| Video analysis end-to-end pipeline | ✅ Complete |
+| Video analysis end-to-end pipeline | ✅ Complete (takeoff-detection bug fixed Phase 9) |
 | Athlete priority metrics (Athlete A alignment) | ✅ Implemented |
 | Test suite | ✅ 174 tests passing |
 | Public datasets downloaded (Zenodo CMJ, CoD, DVJ) | ✅ Done |
 | PINN pre-training run (3000 epochs) | ✅ Done — `final_model.pth` saved |
-| Athlete A’s 45 jump videos processed | ✅ Done — reports in `data/results/` |
-| Takeoff detection accuracy | ⚠ Some failures (wrong frame on ~5 clips) |
+| Athlete A's 45 jump videos processed | ✅ Re-processed Phase 9 with corrected takeoff detection |
+| Takeoff detection accuracy | ✅ Fixed — `argmax(vy)` selects the impulse peak |
 | AddBiomechanics dataset downloaded | ⬜ Pending (highest-quality GRF pre-training data) |
 | Personal data fine-tuning loop | ⬜ Pending (no fine-tuned model yet) |
 
@@ -203,16 +230,18 @@ Complete rewrite of the optimisation engine (from scaffold to 664 lines):
 ## Upcoming Work
 
 ### Immediate
-1. Fix takeoff frame detection failures: trace `src/kinematics/takeoff_analysis.py` frame-selection logic, re-run affected sessions
-2. Validate physics loss convergence: assess whether 1.263 is acceptable or re-training with AddBiomechanics would meaningfully improve GRF prediction
-3. Optionally download AddBiomechanics (requires registration at simtk.org) and re-run pre-training
 
-### Phase 9 — Personal Data Fine-Tuning
+1. Validate physics loss convergence: assess whether 1.263 is acceptable or re-training with AddBiomechanics would meaningfully improve GRF prediction
+2. Optionally download AddBiomechanics (requires registration at simtk.org) and re-run pre-training
+3. Re-run `scripts/optimize_jump.py` on the corrected reports to refresh `data/results/all_optimizations.json`
+
+### Phase 10 — Personal Data Fine-Tuning
+
 - Create `scripts/finetune_personal.py` — load `best_model.pth`, fine-tune on Athlete A's extracted BiomechanicalSamples at lower learning rate, save to `data/models/personal/`
 - Validate fine-tuned model predictions against held-out jump attempts
 - Run `scripts/optimize_jump.py` on Athlete A's full dataset to generate personalised intervention rankings
 
-### Phase 10 — Validation and Paper
+### Phase 11 — Validation and Paper
 - Compare predicted vs. measured jump heights on held-out attempts
 - Confirm sensitivity analysis marginal gains are plausible against coaching intuition
 - Write up methods and results

@@ -325,21 +325,21 @@ def generate_report(
     peak_vertical_grf = float(grf[:, 1].max())
     peak_grf_bw = peak_vertical_grf / (mass * g)
 
-    # Takeoff angle estimation
-    # Find approximate takeoff: last frame where vertical velocity goes positive
+    # Takeoff angle estimation.
+    # Takeoff is the instant the foot leaves the ground — by Newton's 2nd law
+    # the CoM is then a projectile, so vy decreases monotonically (gravity).
+    # Therefore the takeoff frame is where vy reaches its peak.  The previous
+    # implementation used the last upward zero-crossing of vy, which catches
+    # the landing rebound rather than the takeoff impulse.
     vy = com_vel[:, 1]
-    takeoff_candidates = np.where(np.diff(np.sign(vy)) > 0)[0]
-    if len(takeoff_candidates) > 0:
-        takeoff_frame = takeoff_candidates[-1]
+    if len(vy) >= 2:
+        takeoff_frame = int(np.argmax(vy))
         takeoff_vel = com_vel[takeoff_frame]
-        takeoff_angle = float(np.degrees(np.arctan2(
-            takeoff_vel[1],
-            np.sqrt(takeoff_vel[0] ** 2 + takeoff_vel[2] ** 2)
-        )))
         takeoff_horiz = float(np.sqrt(takeoff_vel[0] ** 2 + takeoff_vel[2] ** 2))
         takeoff_vert = float(takeoff_vel[1])
+        takeoff_angle = float(np.degrees(np.arctan2(takeoff_vert, takeoff_horiz)))
     else:
-        takeoff_frame = len(vy) // 2
+        takeoff_frame = 0
         takeoff_angle = None
         takeoff_horiz = None
         takeoff_vert = None
