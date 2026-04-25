@@ -202,6 +202,30 @@ A new Claude onboarding pass audited the working tree against the committed stat
 - `CLAUDE_ONBOARDING.md` claims "5 clips" of takeoff detection failure; actual count was **45/45**.
 - `CLAUDE_ONBOARDING.md` lists optimal Fosbury Flop takeoff angle as ~20–24° (Dapena 1980); peer-reviewed values are nearer 38–48°. Not changed in this pass — flagged for review with the BMS PhD student.
 
+### Phase 9 follow-ups (open issues uncovered by re-processing)
+
+After the fix, **0/45** reports have negative takeoff angles or velocities (was 45/45). However, validation of the regenerated `all_sessions_report.json` revealed two upstream issues that bound how trustworthy the absolute-magnitude metrics are. They are **out of scope for the takeoff-frame fix itself** and are tracked here as deferred work.
+
+#### 9a. Single-camera scale calibration is fragile
+
+- **Symptom:** 27 of 45 clips report peak CoM heights between 3.0 m and 8.9 m — physically impossible (an elite female athlete's peak CoM in flight is ~2.2–2.7 m). Inflated CoM positions propagate to inflated takeoff velocities (median vy on the inflated subset is ~10 m/s; ground-truth elite range is 3.5–4.5 m/s).
+- **Root cause:** `src/pose_estimation/scale_calibration.py` derives metres-per-pixel from the **nose-ankle landmark span in a single high-confidence frame**. When that frame has the athlete far from camera, partially occluded, or at an oblique angle, the normalised span shrinks and the resulting m/unit balloons (e.g. observed `nose-ankle = 0.141 normalised → 12.01 m/unit` for one clip). Once scale is wrong, every downstream CoM coordinate is wrong by the same factor.
+- **Implication:** **Relative kinematics** (joint angles, body alignment, hip arch, free-knee drive direction, foot-to-ground angle) are scale-invariant and remain trustworthy on all 45 clips. **Absolute translational metrics** (CoM peak height, takeoff vy/vh, predicted bar clearance) are only trustworthy on the 18 clips where the calibration happened to land on a clean nose-ankle frame.
+- **Proposed fix (preferred — works with existing footage):** add a physical-reference calibration path. The crossbar (3.98–4.02 m horizontal length, IAAF spec) and the standards (uprights at known separation) are visible in most clips. Detect them once per video (Hough line + colour mask, or a small fine-tuned YOLO head) and use the bar's known length as the scale reference instead of nose-ankle. Filenames already encode bar height (e.g. `_1.79`) which gives a vertical reference too.
+- **Alternative fix (cleaner, but requires re-filming):** two-camera DLT triangulation. Pipeline support already exists in `src/pose_estimation/dlt_triangulation.py`; only requires synced second-camera setup at training sessions going forward.
+- **Hardening regardless of approach:** robustify nose-ankle calibration by taking the **median scale across all frames where both nose and ankles have visibility > 0.7**, rejecting outliers via MAD, instead of trusting a single frame.
+
+#### 9b. `argmax(vy)` is sensitive to noise spikes
+
+- **Symptom:** on the plausible-scale subset (peak CoM < 3 m), the median takeoff angle came out at 79° — too steep. This is partly a real Fosbury-Flop signature (high vy, low vh at toe-off) but is exaggerated by the takeoff frame sometimes landing on a single-frame velocity spike where vh has been noise-suppressed near zero.
+- **Root cause:** `np.gradient(com_position)` amplifies the residual jitter left by the 10 Hz Butterworth filter; `argmax(vy)` then sometimes picks a 1-frame spike rather than the impulse peak.
+- **Proposed fix:** anchor takeoff to ground contact instead of velocity. `src/kinematics/run_up_analysis.py:detect_ground_contacts` already detects ground-contact intervals from ankle Y position. Define takeoff as the **last frame of the last detected ground contact** (toe-off). Read `com_velocity` at that frame. Physically grounded (literally — it's where the foot leaves the ground) and noise-robust because it depends on a sustained contact interval rather than a single peak.
+- **Effort:** small (~30 lines in `analyze_jump_video.py`); the detection function already exists and is unit-tested.
+
+#### 9c. Optimisation results are stale relative to corrected reports
+
+- `data/results/all_optimizations.json` was generated against the pre-fix `all_sessions_report.json` and references negative takeoff angles. After 9b above, re-run `scripts/optimize_jump.py --all data/results/all_sessions_report.json` to refresh.
+
 ---
 
 ## Current State (25 April 2026)
@@ -221,7 +245,9 @@ A new Claude onboarding pass audited the working tree against the committed stat
 | Public datasets downloaded (Zenodo CMJ, CoD, DVJ) | ✅ Done |
 | PINN pre-training run (3000 epochs) | ✅ Done — `final_model.pth` saved |
 | Athlete A's 45 jump videos processed | ✅ Re-processed Phase 9 with corrected takeoff detection |
-| Takeoff detection accuracy | ✅ Fixed — `argmax(vy)` selects the impulse peak |
+| Takeoff detection (frame selection) | ✅ Fixed — `argmax(vy)` selects the impulse peak |
+| Takeoff detection (noise robustness) | ⚠ See Phase 9b — switch to ground-contact anchor |
+| Single-camera scale calibration | ⚠ See Phase 9a — 27/45 clips have inflated CoM (need crossbar reference) |
 | AddBiomechanics dataset downloaded | ⬜ Pending (highest-quality GRF pre-training data) |
 | Personal data fine-tuning loop | ⬜ Pending (no fine-tuned model yet) |
 
