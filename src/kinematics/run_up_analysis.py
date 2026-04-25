@@ -99,6 +99,15 @@ class RunUpMetrics:
     # Athlete A: "I have a habit of swinging my arm out to the side which can
     # throw off my body position."  Positive = arm swings outward laterally.
 
+    # ── Per-stride body alignment on curve (Athlete A Q2 item 7) ─────────────
+    body_alignment_deviation_per_stride_deg: list[float] = field(default_factory=list)
+    # For each stride, the maximum angular deviation (degrees) of any
+    # intermediate joint (knee, hip, shoulder) from the ankle-to-head
+    # reference line.  0° = perfectly straight.  Mirrors the same measure
+    # used at takeoff (TakeoffMetrics.body_alignment_deviation_deg) but
+    # reported per-stride across the full approach and curve.
+    # Athlete A: "body angle and in straight line on the curve"
+
 
 def detect_ground_contacts(
     ankle_positions: np.ndarray,

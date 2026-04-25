@@ -111,6 +111,10 @@ class SessionContext:
     temperature_c: Optional[float] = None
     wind_speed_mps: Optional[float] = None
 
+    # Physiological (Athlete A Q6 — additional modulating factors)
+    menstrual_cycle_phase: Optional[str] = None    # e.g. "follicular", "luteal", "menstrual"
+    injury_flag: Optional[str] = None              # e.g. "hamstring_strain_mild" or None
+
 
 @dataclass
 class BiomechanicalSample:
