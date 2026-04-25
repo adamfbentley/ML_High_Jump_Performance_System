@@ -6,9 +6,7 @@ datasets:
   # -- Tier 1: Zenodo (no account required, download manually) -------------
   - cmj_grf_zenodo        # 663 CMJ trials, GRF + accelerometer  (18 MB,  priority 8)
   - cod_ik_id_zenodo      # 30 CoD trials, full IK/ID + GRF       (73 MB,  priority 7)
-  # - dvj_opensim_zenodo  # 28 subjects, drop-VJ kinematics+GRF   (1.5 GB, priority 9)
-  #   NOTE: DVJ re-enabled once dvj_cache.npz is built (see load_dvj_zenodo caching).
-  #   First run: ~4h text parsing. Subsequent runs: ~30s from cache.
+  - dvj_opensim_zenodo    # 28 subjects, drop-VJ kinematics+GRF   (1.5 GB, priority 9)
 
   # -- Tier 2: manual download (free account required) ---------------------
   # addbiomechanics: https://addbiomechanics.org/download_data.html
@@ -51,4 +49,4 @@ weight_decay: 0.00001
 
 # ── Output ────────────────────────────────────────────────────────
 save_every: 500
-log_interval: 1
+log_interval: 50
