@@ -78,3 +78,12 @@ scripts/quick_check.py
 # ---- OS ----
 .DS_Store
 Desktop.ini
+
+# ---- Agent / prompt / onboarding files (local AI tooling) ----
+.github/agents/
+.github/prompts/
+CLAUDE_ONBOARDING.md
+
+# ---- Athlete private data ----
+imogens_response- to-questions/
+questions to imogen.md
