@@ -153,6 +153,30 @@ Complete rewrite of the optimisation engine (from scaffold to 664 lines):
 
 ---
 
+## Phase 8 — Pre-Training Execution and Imogen Video Processing
+
+**Work done (14–15 April 2026):**
+
+### Public dataset pre-training
+- Downloaded Zenodo CMJ GRF dataset (`data/public/cmj_grf_zenodo/`), Nitschke et al. CoD dataset (`data/public/cod_ik_id_zenodo/`, 10 participants), and DVJ OpenSim dataset (`data/public/dvj_opensim_zenodo/`)
+- Ran `scripts/pretrain_dynamics_pinn.py` for 3000 epochs
+- Checkpoints saved every 500 epochs; best model saved by physics loss
+- Results:
+  - `experiments/results/pretrain_dynamics/final_model.pth` (1.03 MB)
+  - `experiments/results/pretrain_dynamics/best_model.pth` (829 KB)
+  - `experiments/results/pretrain_dynamics/loss_history.npz`
+  - Final losses: `data_loss=0.899`, `physics_loss=1.263`, `total_loss=2.162`
+  - ⚠ Physics loss plateaued around 1.25 rather than converging to <0.5 — AddBiomechanics (highest-quality GRF data) not yet included
+
+### Imogen's jump videos processed
+- 45 jump attempts across 8 training sessions run through `scripts/analyze_jump_video.py`
+- Per-session reports in `data/results/` (e.g. `13_12_25_report.json`, `14_02_26_one_1.79_report.json`)
+- `data/results/all_sessions_report.json` — full multi-session summary
+- `data/results/all_optimizations.json` — optimiser output for one session
+- ⚠ Takeoff frame detection failures identified: some clips report `takeoff_angle_deg = -85°`, `takeoff_vertical_mps = -2.26 m/s` — physically impossible; frame-selection logic requires fixing
+
+---
+
 ## Current State (April 2026)
 
 | Area | Status |
@@ -167,26 +191,28 @@ Complete rewrite of the optimisation engine (from scaffold to 664 lines):
 | Video analysis end-to-end pipeline | ✅ Complete |
 | Athlete priority metrics (Imogen alignment) | ✅ Implemented |
 | Test suite | ✅ 174 tests passing |
-| Public datasets downloaded | ⬜ Pending (data/public/ empty) |
-| PINN pre-training run | ⬜ Pending (requires datasets) |
-| Personal data fine-tuning loop | ⬜ Pending (Phase 5) |
+| Public datasets downloaded (Zenodo CMJ, CoD, DVJ) | ✅ Done |
+| PINN pre-training run (3000 epochs) | ✅ Done — `final_model.pth` saved |
+| Imogen’s 45 jump videos processed | ✅ Done — reports in `data/results/` |
+| Takeoff detection accuracy | ⚠ Some failures (wrong frame on ~5 clips) |
+| AddBiomechanics dataset downloaded | ⬜ Pending (highest-quality GRF pre-training data) |
+| Personal data fine-tuning loop | ⬜ Pending (no fine-tuned model yet) |
 
 ---
 
 ## Upcoming Work
 
 ### Immediate
-1. Download public pre-training datasets (AddBiomechanics, Zenodo CMJ/CoD/DVJ)
-2. Run pre-training smoke test: `python scripts/pretrain_dynamics_pinn.py --config experiments/configs/pretrain_dynamics.yaml --max-subjects 5 --epochs 100`
-3. Validate physics loss convergence (InverseDynamicsPINN residual should decrease monotonically)
+1. Fix takeoff frame detection failures: trace `src/kinematics/takeoff_analysis.py` frame-selection logic, re-run affected sessions
+2. Validate physics loss convergence: assess whether 1.263 is acceptable or re-training with AddBiomechanics would meaningfully improve GRF prediction
+3. Optionally download AddBiomechanics (requires registration at simtk.org) and re-run pre-training
 
-### Phase 5 — Personal Data Loop
-- Film Imogen's jump sessions using standard phone protocol
-- Run `scripts/analyze_jump_video.py` to extract per-attempt kinematics
-- Fine-tune the pre-trained PINN on Imogen's data
-- Generate personalised intervention recommendations via `scripts/optimize_jump.py`
+### Phase 9 — Personal Data Fine-Tuning
+- Create `scripts/finetune_personal.py` — load `best_model.pth`, fine-tune on Imogen's extracted BiomechanicalSamples at lower learning rate, save to `data/models/personal/`
+- Validate fine-tuned model predictions against held-out jump attempts
+- Run `scripts/optimize_jump.py` on Imogen's full dataset to generate personalised intervention rankings
 
-### Phase 6 — Validation and Paper
+### Phase 10 — Validation and Paper
 - Compare predicted vs. measured jump heights on held-out attempts
-- Sensitivity analysis validation: confirm predicted marginal gains are plausible against coaching intuition
+- Confirm sensitivity analysis marginal gains are plausible against coaching intuition
 - Write up methods and results
