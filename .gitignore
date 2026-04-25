@@ -82,9 +82,11 @@ Desktop.ini
 # ---- Agent / prompt / onboarding files (local AI tooling) ----
 .github/agents/
 .github/prompts/
+.github/copilot-instructions.md
 AGENTS.md
 CLAUDE_ONBOARDING.md
 
 # ---- Athlete private data ----
 imogens_response- to-questions/
 questions to imogen.md
+EMAIL_FOR_IMOGEN.md
