@@ -31,8 +31,12 @@ For long-form first-time onboarding: `CLAUDE_ONBOARDING.md` (~340 lines).
 ## Quick commands
 
 ```bash
-# Run the full non-PINN test suite (currently 187 passing)
+# Run the full non-PINN test suite (currently 190 passing)
 .venv/Scripts/python.exe -m pytest tests/ --ignore=tests/test_pinn -q
+
+# Build/query local agent memory
+.venv/Scripts/python.exe tools/memory/build_index.py
+.venv/Scripts/python.exe tools/memory/query_index.py "takeoff angle horizontal velocity"
 
 # Re-process Athlete A's videos with sample caching (~35 min for 45 videos)
 .venv/Scripts/python.exe scripts/analyze_jump_video.py "data/High Jump Videos" --save-samples data/results/samples --thigh 0.45 --shank 0.45
@@ -69,6 +73,14 @@ Do **not** fine-tune yet. The blocker is no longer only vertical scale: takeoff
 horizontal velocity is unreliable from panned single-camera footage (median
 takeoff horizontal speed 1.08 m/s, only 2/45 in 2.5-5.5 m/s), so reported
 takeoff angles are still not trustworthy.
+
+## Agent memory
+
+Use `memory/` for file-mediated Claude/Codex collaboration. `tools/memory/`
+builds and queries a local ChromaDB index using deterministic local hashing
+embeddings. The generated `memory/vector_index/` and JSONL logs are ignored.
+Do not index private athlete reports, videos, raw session metadata, or private
+emails.
 
 ## Athlete-domain priorities (from Athlete A's brief)
 

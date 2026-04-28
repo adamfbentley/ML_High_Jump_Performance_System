@@ -1,0 +1,1 @@
+"""Lightweight local RAG tooling."""
