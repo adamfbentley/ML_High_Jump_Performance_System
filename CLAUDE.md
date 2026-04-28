@@ -31,7 +31,7 @@ For long-form first-time onboarding: `CLAUDE_ONBOARDING.md` (~340 lines).
 ## Quick commands
 
 ```bash
-# Run the full test suite (currently 176 passing)
+# Run the full non-PINN test suite (currently 187 passing)
 .venv/Scripts/python.exe -m pytest tests/ --ignore=tests/test_pinn -q
 
 # Re-process Athlete A's videos with sample caching (~35 min for 45 videos)
