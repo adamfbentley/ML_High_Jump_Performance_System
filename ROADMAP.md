@@ -274,9 +274,27 @@ of the scale-calibration fix.
 - Added regression tests in `tests/test_kinematics/test_takeoff.py` showing the
   report ignores a later one-frame vertical-velocity spike and still falls back
   when no contact interval is available.
-- Full non-PINN test suite now reports **186 passing**.
-- Full 45-video re-processing with `--save-samples --thigh 0.43 --shank 0.47`
-  remains pending; this is the next validation step before personal fine-tune.
+- Full non-PINN test suite now reports **187 passing**.
+- Bar-height metadata parsing now accepts numeric video extensions (e.g. `.mp4`).
+
+**Phase 9-final validation — full 45-video re-process**
+- Re-ran `scripts/analyze_jump_video.py` over all 45 private high-jump videos
+  with `--save-samples data/results/samples --thigh 0.43 --shank 0.47`.
+- Outputs regenerated locally: `data/results/all_sessions_report.json` and
+  45/45 cached `.npz` samples under `data/results/samples/` (all gitignored).
+- Aggregate residual distribution:
+  - Peak CoM: median 1.67 m; 9/45 in the handoff target range of 2.0-2.7 m.
+  - Takeoff vertical velocity: median 3.16 m/s; 18/45 in 3.0-4.5 m/s.
+  - Takeoff angle: median 66.6°; 3/45 in 38-48°.
+  - Bar-height metadata was recovered for 17/45 videos; median CoM-minus-bar
+    on that subset was -0.05 m, with 8/17 in -0.30 to +0.10 m.
+- **Decision:** do not run Phase 10 fine-tuning yet. The guardrail would accept
+  many cached samples, but the extracted translational metrics are still not
+  trustworthy enough for personalised training.
+- Current blocker: horizontal velocity from panned single-camera footage is not
+  scene-fixed. Takeoff horizontal velocity median is 1.08 m/s (2/45 in
+  2.5-5.5 m/s), while peak horizontal velocity is noisy in the opposite
+  direction. This keeps takeoff-angle outputs unreliable even after 9b.
 
 **Context files refresh**
 - `.github/copilot-instructions.md`: refreshed phase list to reflect Phase 9
@@ -293,13 +311,14 @@ of the scale-calibration fix.
 
 ### Phase 9 follow-ups (open issues uncovered by re-processing)
 
-After the fix, **0/45** reports have negative takeoff angles or velocities (was 45/45). However, validation of the regenerated `all_sessions_report.json` revealed two upstream issues that bound how trustworthy the absolute-magnitude metrics are. They are **out of scope for the takeoff-frame fix itself** and are tracked here as deferred work.
+After the 9a/9b fixes, **0/45** reports have negative takeoff angles or velocities (was 45/45). However, validation of the regenerated `all_sessions_report.json` still shows that absolute translational metrics are not reliable enough for fine-tuning. The remaining issues are tracked here.
 
 #### 9a. Single-camera scale calibration is fragile
 
-- **Symptom:** 27 of 45 clips report peak CoM heights between 3.0 m and 8.9 m — physically impossible (an elite female athlete's peak CoM in flight is ~2.2–2.7 m). Inflated CoM positions propagate to inflated takeoff velocities (median vy on the inflated subset is ~10 m/s; ground-truth elite range is 3.5–4.5 m/s).
-- **Root cause:** `src/pose_estimation/scale_calibration.py` derives metres-per-pixel from the **nose-ankle landmark span in a single high-confidence frame**. When that frame has the athlete far from camera, partially occluded, or at an oblique angle, the normalised span shrinks and the resulting m/unit balloons (e.g. observed `nose-ankle = 0.141 normalised → 12.01 m/unit` for one clip). Once scale is wrong, every downstream CoM coordinate is wrong by the same factor.
-- **Implication:** **Relative kinematics** (joint angles, body alignment, hip arch, free-knee drive direction, foot-to-ground angle) are scale-invariant and remain trustworthy on all 45 clips. **Absolute translational metrics** (CoM peak height, takeoff vy/vh, predicted bar clearance) are only trustworthy on the 18 clips where the calibration happened to land on a clean nose-ankle frame.
+- **Original symptom:** 27 of 45 clips reported peak CoM heights between 3.0 m and 8.9 m under the legacy nose-ankle scale. Phase 9a removed most gross inflation (new max 3.41 m), but only 9/45 clips now fall in the handoff target range of 2.0-2.7 m.
+- **Current symptom:** the bar-tagged subset looks more plausible than the 2.0-2.7 m absolute target suggests (median CoM-minus-bar -0.05 m), so the expected peak-CoM validation range may need biomechanics review. Absolute scale is improved but not yet validated enough for fine-tuning.
+- **Root cause:** the v1 thigh/shank projection scale is still single-camera and scene-geometry limited. It improves vertical scale, but without a fixed scene reference or second camera, absolute translational coordinates remain sensitive to camera distance, limb projection, and panning.
+- **Implication:** **Relative kinematics** (joint angles, body alignment, hip arch, free-knee drive direction, foot-to-ground angle) are scale-invariant and remain the safest outputs. **Absolute translational metrics** (CoM peak height, takeoff vy/vh, predicted bar clearance) still need validation before training on private samples.
 - **Proposed fix (preferred — works with existing footage):** add a physical-reference calibration path. The crossbar (3.98–4.02 m horizontal length, IAAF spec) and the standards (uprights at known separation) are visible in most clips. Detect them once per video (Hough line + colour mask, or a small fine-tuned YOLO head) and use the bar's known length as the scale reference instead of nose-ankle. Filenames already encode bar height (e.g. `_1.79`) which gives a vertical reference too.
 - **Alternative fix (cleaner, but requires re-filming):** two-camera DLT triangulation. Pipeline support already exists in `src/pose_estimation/dlt_triangulation.py`; only requires synced second-camera setup at training sessions going forward.
 - **Hardening regardless of approach:** robustify nose-ankle calibration by taking the **median scale across all frames where both nose and ankles have visibility > 0.7**, rejecting outliers via MAD, instead of trusting a single frame.
@@ -309,11 +328,11 @@ After the fix, **0/45** reports have negative takeoff angles or velocities (was 
 - **Symptom:** on the plausible-scale subset (peak CoM < 3 m), the median takeoff angle came out at 79° — too steep. This is partly a real Fosbury-Flop signature (high vy, low vh at toe-off) but is exaggerated by the takeoff frame sometimes landing on a single-frame velocity spike where vh has been noise-suppressed near zero.
 - **Root cause:** `np.gradient(com_position)` amplifies the residual jitter left by the 10 Hz Butterworth filter; `argmax(vy)` then sometimes picks a 1-frame spike rather than the impulse peak.
 - **Fix:** `scripts/analyze_jump_video.py` anchors takeoff to ground contact instead of velocity. It runs `src/kinematics/run_up_analysis.py:detect_ground_contacts` on both ankle trajectories and reads `com_velocity` at the final frame of the final pre-peak contact interval. If no contact is detected, it falls back to `argmax(vy)`.
-- **Validation:** `tests/test_kinematics/test_takeoff.py` covers the noise-spike case and the no-contact fallback. Full suite: 186 passing with `tests/test_pinn` ignored.
+- **Validation:** `tests/test_kinematics/test_takeoff.py` covers the noise-spike case, no-contact fallback, and bar-height parsing. Full suite: 187 passing with `tests/test_pinn` ignored.
 
 #### 9c. Optimisation results are stale relative to corrected reports
 
-- `data/results/all_optimizations.json` was generated against the pre-fix `all_sessions_report.json` and references negative takeoff angles. After 9b above, re-run `scripts/optimize_jump.py --all data/results/all_sessions_report.json` to refresh.
+- `data/results/all_optimizations.json` was generated against the pre-fix `all_sessions_report.json` and references negative takeoff angles. Do not refresh optimiser outputs until the residual translational-metric issue above is resolved; otherwise the optimiser will optimise against untrustworthy takeoff angles.
 
 ---
 
@@ -330,13 +349,13 @@ After the fix, **0/45** reports have negative takeoff angles or velocities (was 
 | Differentiable optimiser + sensitivity analysis | ✅ Complete and tested |
 | Video analysis end-to-end pipeline | ✅ Complete (takeoff-detection bug fixed Phase 9) |
 | Athlete priority metrics (Imogen alignment) | ✅ Implemented |
-| Test suite | ✅ 174 tests passing |
+| Test suite | ✅ 187 tests passing (`tests/test_pinn` ignored) |
 | Public datasets downloaded (Zenodo CMJ, CoD, DVJ) | ✅ Done |
 | PINN pre-training run (3000 epochs) | ✅ Done — `final_model.pth` saved |
-| Imogen's 45 jump videos processed | ✅ Re-processed Phase 9 with corrected takeoff detection |
-| Takeoff detection (frame selection) | ✅ Fixed — `argmax(vy)` selects the impulse peak |
-| Takeoff detection (noise robustness) | ⚠ See Phase 9b — switch to ground-contact anchor |
-| Single-camera scale calibration | ⚠ See Phase 9a — 27/45 clips have inflated CoM (need crossbar reference) |
+| Imogen's 45 jump videos processed | ✅ Re-processed Phase 9a/9b with 45 cached samples |
+| Takeoff detection (frame selection) | ✅ Fixed — contact-anchored takeoff with velocity fallback |
+| Takeoff detection (noise robustness) | ✅ Phase 9b implemented and tested |
+| Single-camera scale calibration | ⚠ Improved, but absolute translational metrics still not training-grade |
 | AddBiomechanics dataset downloaded | ⬜ Pending (highest-quality GRF pre-training data) |
 | Personal data fine-tuning loop | ⬜ Pending (no fine-tuned model yet) |
 
@@ -346,13 +365,21 @@ After the fix, **0/45** reports have negative takeoff angles or velocities (was 
 
 ### Immediate
 
-1. Validate physics loss convergence: assess whether 1.263 is acceptable or re-training with AddBiomechanics would meaningfully improve GRF prediction
-2. Optionally download AddBiomechanics (requires registration at simtk.org) and re-run pre-training
-3. Re-run `scripts/optimize_jump.py` on the corrected reports to refresh `data/results/all_optimizations.json`
+1. Resolve the remaining translational-metric blocker before Phase 10:
+   panned single-camera footage does not provide scene-fixed horizontal
+   displacement, so takeoff horizontal velocity and takeoff angle are unreliable.
+2. Add a fixed scene reference path (crossbar/uprights or homography) or move to
+   two-camera DLT for future filming; then re-run the 45-video cache.
+3. Review the peak-CoM validation target with the BMS PhD student: the
+   bar-tagged subset's CoM-minus-bar distribution looks more plausible than the
+   handoff's 2.0-2.7 m absolute range implies.
+4. Only after the above, run `scripts/finetune_personal.py --dry-run`, then
+   fine-tune if enough samples survive the guardrails.
 
 ### Phase 10 — Personal Data Fine-Tuning
 
-- Create `scripts/finetune_personal.py` — load `best_model.pth`, fine-tune on Imogen's extracted BiomechanicalSamples at lower learning rate, save to `data/models/personal/`
+- `scripts/finetune_personal.py` exists, but fine-tuning is blocked until
+  extracted translational metrics are validated.
 - Validate fine-tuned model predictions against held-out jump attempts
 - Run `scripts/optimize_jump.py` on Imogen's full dataset to generate personalised intervention rankings
 
