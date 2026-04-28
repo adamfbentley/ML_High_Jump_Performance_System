@@ -255,13 +255,11 @@ of the scale-calibration fix.
   - The remaining inflation on this clip comes from MediaPipe landmark
     jitter being amplified by the larger m/px scale (athlete is far from
     camera, ~63 px thigh vs 151 px in close clip). This is partly
-    fundamental — single-camera resolution is the limit. The vy=38 m/s
-    artifact is also influenced by Phase 9b (`argmax(vy)` picking
-    transient spikes). Re-processing all 45 clips to characterise the
-    distribution of remaining error is still pending.
-- All tests pass (12/12 scale calibration; full suite was 183 last verified
-  before the ground-reference percentile fix — re-run before the next
-  commit).
+    fundamental — single-camera resolution is the limit. At this point in the
+    timeline, the vy=38 m/s artifact was also influenced by the pre-9b
+    `argmax(vy)` takeoff selector picking transient spikes.
+- Current full non-PINN suite is 187 passing after 9a/9b and bar-height parser
+  fixes.
 
 **Phase 9b — ground-contact takeoff anchor**
 - `scripts/analyze_jump_video.py` now selects takeoff as the final frame of
@@ -336,7 +334,7 @@ After the 9a/9b fixes, **0/45** reports have negative takeoff angles or velociti
 
 ---
 
-## Current State (25 April 2026)
+## Current State (29 April 2026)
 
 | Area | Status |
 |---|---|
