@@ -34,8 +34,8 @@ For long-form first-time onboarding: `CLAUDE_ONBOARDING.md` (~340 lines).
 # Run the full test suite (currently 176 passing)
 .venv/Scripts/python.exe -m pytest tests/ --ignore=tests/test_pinn -q
 
-# Re-process Athlete A's videos with sample caching (~45 min for 45 videos)
-.venv/Scripts/python.exe scripts/analyze_jump_video.py "data/High Jump Videos" --save-samples
+# Re-process Athlete A's videos with sample caching (~35 min for 45 videos)
+.venv/Scripts/python.exe scripts/analyze_jump_video.py "data/High Jump Videos" --save-samples data/results/samples --thigh 0.45 --shank 0.45
 
 # Dry-run personal fine-tuning (loads cached samples, applies Phase 9a guardrail)
 .venv/Scripts/python.exe scripts/finetune_personal.py --dry-run
@@ -46,18 +46,29 @@ For long-form first-time onboarding: `CLAUDE_ONBOARDING.md` (~340 lines).
 
 ## Current phase (April 2026)
 
-**Phase 9a v1 SHIPPED, partial improvement.** `src/pose_estimation/scale_calibration.py` now derives a single video-wide metres-per-pixel from the 95th percentile of pixel projections of Athlete A's measured thigh and shank segments (rejects foreshortening), median-aggregated across segments. Ground reference moved from `min(ankle_y)` to `5th-percentile(ankle_y over visible frames)` to eliminate single-frame outlier corruption. CLI takes `--thigh 0.45 --shank 0.45` to enable this path.
+**Phase 9a + 9b SHIPPED, but Phase 10 is blocked.**
 
-Smoke results:
-- `14_02_26_one_1.79.mp4` (previously plausible): peak CoM 2.60→2.39 m, takeoff 49°, vy 3.43 m/s — fully plausible elite-female numbers.
-- `09_02_26_one.mp4` (previously inflated): peak CoM 5.04→3.41 m — improved but vy=38 m/s artifact remains because the athlete is far from camera (~63 px thigh vs 151 px in the close clip), so MediaPipe jitter × m/px is amplified, AND the takeoff frame selection is still picking velocity spikes (Phase 9b territory).
+- 9a: `src/pose_estimation/scale_calibration.py` derives a single video-wide
+  metres-per-pixel from the 95th percentile of visible thigh/shank projections,
+  median-aggregated across segments. Ground reference uses the 5th percentile
+  of visible ankle Y instead of unsafe `min()`.
+- 9b: `scripts/analyze_jump_video.py` selects takeoff as the final frame of the
+  last detected ankle-ground contact before flight, falling back to `argmax(vy)`
+  only when contact detection fails.
+- Bar-height metadata parser fixed for numeric extensions such as `.mp4`.
+- Full re-process completed: 45/45 reports, 45/45 `.npz` samples cached.
 
-**Open Phase 9 follow-ups (still ⏳):**
-- 9b: switch takeoff frame from `argmax(vy)` to last-frame-of-last-ground-contact using existing `detect_ground_contacts`. Removes single-frame velocity-spike sensitivity.
-- Full 45-video re-process with new calibration to characterise the residual error distribution.
-- Fine-tune (Phase 10) blocked on the above.
+Residual aggregate validation:
+- Peak CoM: median 1.67 m; 9/45 in the handoff's 2.0-2.7 m target range.
+- Takeoff vy: median 3.16 m/s; 18/45 in 3.0-4.5 m/s.
+- Takeoff angle: median 66.6 deg; 3/45 in 38-48 deg.
+- Bar-tagged subset: 17/45 filenames exposed bar height; median CoM-minus-bar
+  was -0.05 m and 8/17 were within -0.30 to +0.10 m.
 
-After 9b: re-cache samples (`--save-samples --thigh 0.45 --shank 0.45`), then run `finetune_personal.py`.
+Do **not** fine-tune yet. The blocker is no longer only vertical scale: takeoff
+horizontal velocity is unreliable from panned single-camera footage (median
+takeoff horizontal speed 1.08 m/s, only 2/45 in 2.5-5.5 m/s), so reported
+takeoff angles are still not trustworthy.
 
 ## Athlete-domain priorities (from Athlete A's brief)
 
