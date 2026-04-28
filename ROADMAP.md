@@ -197,6 +197,95 @@ A new Claude onboarding pass audited the working tree against the committed stat
 - Smoke-tested on `14_02_26_one_1.79.mp4`: previously reported `takeoff_angle_deg=-2.8°, takeoff_vertical_mps=-0.01`; post-fix `takeoff_angle_deg=49.0°, takeoff_vertical_mps=3.72` (takeoff vertical velocity now physically plausible for an elite female jumper attempting 1.79 m).
 - All 45 jump videos re-processed end-to-end through `scripts/analyze_jump_video.py "data/High Jump Videos"`; per-session JSONs in `data/results/` and the `all_sessions_report.json` summary regenerated.
 
+### Phase 9-bis (29 April 2026) — fine-tune scaffolding and Phase 9a v1
+
+After surfacing the Phase 9a/9b/9c follow-ups, the next session built the
+infrastructure needed to actually run personalised fine-tuning, plus a v1
+of the scale-calibration fix.
+
+**Sample serialisation (`src/data_pipeline/sample.py`)**
+- Added `BiomechanicalSample.save_npz(path)` / `load_npz(path)` — compressed
+  arrays + JSON metadata. Tested for full + sparse roundtrips.
+- Lets `analyze_jump_video.py` cache extracted kinematics so fine-tuning
+  doesn't have to re-run MediaPipe + OpenSim.
+
+**Cache hook (`scripts/analyze_jump_video.py`)**
+- New `--save-samples [DIR]` flag (default off; bare flag → `data/results/samples`).
+- Smoke-tested: 286 KB `.npz` per video, full roundtrip preserves all fields.
+
+**Personal fine-tune script (`scripts/finetune_personal.py`)**
+- Loads `.npz` cache, applies a Phase-9a scale guardrail (rejects clips with
+  peak CoM > 3 m, configurable via `--max-peak-com-m`), reuses
+  `DynamicsDataset` + Newton-Euler residual identical to pretraining,
+  fine-tunes `best_model.pth` at lr=1e-4, saves
+  `data/models/personal/imogen_finetuned.pth`. Has `--dry-run`.
+
+**Phase 9a v1 — multi-segment scale calibration**
+- `src/pose_estimation/scale_calibration.py`:
+  - New `compute_per_frame_scale_mpp(landmarks_2d, image_w, image_h, thigh_length_m, shank_length_m, …)`.
+  - For each known-length segment (thigh L/R, shank L/R from
+    `SubjectInfo.thigh_length_m` / `shank_length_m`), collects pixel
+    projections across all visibility-gated frames, takes the **95th
+    percentile** as the in-plane projection (rejects foreshortened frames
+    where the limb rotates out of the camera plane), then medians across
+    segments → single video-wide metres-per-pixel.
+  - Returns a (T,)-replicated constant for caller compatibility.
+  - Initial v0 design used a per-frame median across segments and produced
+    1.09 mm/px frame-to-frame std (~31 % of median), which inflated
+    finite-difference velocities. Replaced by the across-video p95 approach
+    above.
+  - Ground reference now uses **5th percentile of visible-ankle Y** instead
+    of `min(...)`. The old `min` was contaminated by single-frame landmark
+    jitter (a lone outlier could push ground 3 m below reality, inflating
+    every downstream Y).
+- `calibrate_landmarks_to_world` accepts optional `thigh_length_m` and
+  `shank_length_m`; falls back to legacy nose-ankle when absent.
+- `scripts/analyze_jump_video.py` adds `--thigh` / `--shank` CLI flags
+  (defaults 0.43 / 0.47 — Imogen's measured values).
+- 8 new tests in `tests/test_pose_estimation/test_scale_calibration.py`
+  covering scalar recovery, foreshortening rejection, visibility gating,
+  graceful fallback, multi-segment median.
+- **Validation results (smoke tests):**
+  - `14_02_26_one_1.79.mp4` (previously plausible): peak CoM 2.60 → 2.39 m,
+    takeoff angle 49 → 49°, vy 3.72 → 3.43 m/s, vh 3.23 → 2.97 m/s.
+    All within elite-female Fosbury-Flop range.
+  - `09_02_26_one.mp4` (previously broken, peak CoM 5.04 m): peak CoM
+    5.04 → 4.17 → 3.41 m through v1 → v1 + ground-ref fix. Improved but
+    still inflated.
+  - The remaining inflation on this clip comes from MediaPipe landmark
+    jitter being amplified by the larger m/px scale (athlete is far from
+    camera, ~63 px thigh vs 151 px in close clip). This is partly
+    fundamental — single-camera resolution is the limit. The vy=38 m/s
+    artifact is also influenced by Phase 9b (`argmax(vy)` picking
+    transient spikes). Re-processing all 45 clips to characterise the
+    distribution of remaining error is still pending.
+- All tests pass (12/12 scale calibration; full suite was 183 last verified
+  before the ground-reference percentile fix — re-run before the next
+  commit).
+
+**Phase 9b — ground-contact takeoff anchor**
+- `scripts/analyze_jump_video.py` now selects takeoff as the final frame of
+  the last detected ankle-ground contact, using `detect_ground_contacts` on
+  both ankle trajectories after converting calibrated metres to centimetres.
+- Falls back to `argmax(vy)` when no contacts are detected, preserving output
+  for short clips or failed pose extraction.
+- Ground-contact candidates after peak CoM are ignored when pre-peak contacts
+  exist, preventing landing/mat contacts from being selected as takeoff.
+- Added regression tests in `tests/test_kinematics/test_takeoff.py` showing the
+  report ignores a later one-frame vertical-velocity spike and still falls back
+  when no contact interval is available.
+- Full non-PINN test suite now reports **186 passing**.
+- Full 45-video re-processing with `--save-samples --thigh 0.43 --shank 0.47`
+  remains pending; this is the next validation step before personal fine-tune.
+
+**Context files refresh**
+- `.github/copilot-instructions.md`: refreshed phase list to reflect Phase 9
+  audit + 9a, corrected Fosbury Flop takeoff-angle range to 38–48° from
+  Dapena (1980, 1995) — was incorrectly listed as 20–24°.
+- `AGENTS.md`: replaced obsolete agent-orchestrator scaffolding section
+  with a sources-of-truth table.
+- `CLAUDE.md`: created — tight bootstrap auto-loaded each conversation.
+
 ### Onboarding-doc inaccuracies surfaced
 
 - `CLAUDE_ONBOARDING.md` claims "5 clips" of takeoff detection failure; actual count was **45/45**.
@@ -215,12 +304,12 @@ After the fix, **0/45** reports have negative takeoff angles or velocities (was 
 - **Alternative fix (cleaner, but requires re-filming):** two-camera DLT triangulation. Pipeline support already exists in `src/pose_estimation/dlt_triangulation.py`; only requires synced second-camera setup at training sessions going forward.
 - **Hardening regardless of approach:** robustify nose-ankle calibration by taking the **median scale across all frames where both nose and ankles have visibility > 0.7**, rejecting outliers via MAD, instead of trusting a single frame.
 
-#### 9b. `argmax(vy)` is sensitive to noise spikes
+#### 9b. `argmax(vy)` was sensitive to noise spikes — fixed
 
 - **Symptom:** on the plausible-scale subset (peak CoM < 3 m), the median takeoff angle came out at 79° — too steep. This is partly a real Fosbury-Flop signature (high vy, low vh at toe-off) but is exaggerated by the takeoff frame sometimes landing on a single-frame velocity spike where vh has been noise-suppressed near zero.
 - **Root cause:** `np.gradient(com_position)` amplifies the residual jitter left by the 10 Hz Butterworth filter; `argmax(vy)` then sometimes picks a 1-frame spike rather than the impulse peak.
-- **Proposed fix:** anchor takeoff to ground contact instead of velocity. `src/kinematics/run_up_analysis.py:detect_ground_contacts` already detects ground-contact intervals from ankle Y position. Define takeoff as the **last frame of the last detected ground contact** (toe-off). Read `com_velocity` at that frame. Physically grounded (literally — it's where the foot leaves the ground) and noise-robust because it depends on a sustained contact interval rather than a single peak.
-- **Effort:** small (~30 lines in `analyze_jump_video.py`); the detection function already exists and is unit-tested.
+- **Fix:** `scripts/analyze_jump_video.py` anchors takeoff to ground contact instead of velocity. It runs `src/kinematics/run_up_analysis.py:detect_ground_contacts` on both ankle trajectories and reads `com_velocity` at the final frame of the final pre-peak contact interval. If no contact is detected, it falls back to `argmax(vy)`.
+- **Validation:** `tests/test_kinematics/test_takeoff.py` covers the noise-spike case and the no-contact fallback. Full suite: 186 passing with `tests/test_pinn` ignored.
 
 #### 9c. Optimisation results are stale relative to corrected reports
 

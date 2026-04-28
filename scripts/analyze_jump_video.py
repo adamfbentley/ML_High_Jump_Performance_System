@@ -299,6 +299,38 @@ def run_pinn_inference(
 # ── Summary Report ─────────────────────────────────────────────────────
 
 
+def select_takeoff_frame_from_ground_contact(
+    sample: BiomechanicalSample,
+    fallback_frame: int,
+) -> int:
+    """Select toe-off as the final frame of the last detected ground contact.
+
+    `detect_ground_contacts` works in centimetres; video-pipeline pose landmarks
+    are calibrated in metres, so ankle trajectories are converted before use.
+    """
+    if sample.pose_3d is None or sample.pose_3d.ndim != 3 or sample.pose_3d.shape[1] <= 28:
+        return fallback_frame
+
+    contacts: list[tuple[int, int]] = []
+    for ankle_idx in (27, 28):
+        ankle_m = sample.pose_3d[:, ankle_idx, :3]
+        if ankle_m.shape[0] == 0 or not np.isfinite(ankle_m[:, 1]).any():
+            continue
+        contacts.extend(detect_ground_contacts(ankle_m * 100.0, sample.fps))
+
+    if not contacts:
+        return fallback_frame
+
+    if sample.com_position is not None and len(sample.com_position) > 0:
+        peak_com_frame = int(np.argmax(sample.com_position[:, 1]))
+        pre_peak_contacts = [contact for contact in contacts if contact[1] <= peak_com_frame]
+        if pre_peak_contacts:
+            contacts = pre_peak_contacts
+
+    contacts.sort(key=lambda contact: (contact[1], contact[0]))
+    return int(contacts[-1][1])
+
+
 def generate_report(
     sample: BiomechanicalSample,
     pinn_grf: np.ndarray | None,
@@ -326,14 +358,15 @@ def generate_report(
     peak_grf_bw = peak_vertical_grf / (mass * g)
 
     # Takeoff angle estimation.
-    # Takeoff is the instant the foot leaves the ground — by Newton's 2nd law
-    # the CoM is then a projectile, so vy decreases monotonically (gravity).
-    # Therefore the takeoff frame is where vy reaches its peak.  The previous
-    # implementation used the last upward zero-crossing of vy, which catches
-    # the landing rebound rather than the takeoff impulse.
+    # Takeoff is the instant the takeoff foot leaves the ground.  Anchor frame
+    # selection to detected ankle-ground contact rather than a single-frame
+    # velocity maximum, which is sensitive to finite-difference jitter.
     vy = com_vel[:, 1]
     if len(vy) >= 2:
-        takeoff_frame = int(np.argmax(vy))
+        fallback_takeoff_frame = int(np.argmax(vy))
+        takeoff_frame = select_takeoff_frame_from_ground_contact(
+            sample, fallback_frame=fallback_takeoff_frame,
+        )
         takeoff_vel = com_vel[takeoff_frame]
         takeoff_horiz = float(np.sqrt(takeoff_vel[0] ** 2 + takeoff_vel[2] ** 2))
         takeoff_vert = float(takeoff_vel[1])
@@ -404,18 +437,34 @@ def analyze_video(
     video_path: Path,
     body_mass_kg: float = 67.0,
     height_m: float = 1.78,
+    thigh_length_m: float | None = None,
+    shank_length_m: float | None = None,
     model_path: Path | None = None,
+    samples_out_dir: Path | None = None,
 ) -> dict:
-    """Run the full analysis pipeline on a single video."""
+    """Run the full analysis pipeline on a single video.
+
+    If `samples_out_dir` is given, the extracted `BiomechanicalSample` is
+    cached there as `<video_stem>.npz` for downstream fine-tuning
+    (see scripts/finetune_personal.py).
+
+    `thigh_length_m` and `shank_length_m`, when provided, switch scale
+    calibration from the legacy single-frame nose-ankle estimator to the
+    Phase 9a multi-segment per-frame estimator (much more accurate).
+    """
     logger.info(f"=== Analyzing: {video_path.name} ===")
 
     # 1. Pose estimation (2D normalised + 3D world)
     landmarks_2d, landmarks_3d_world, fps, vid_w, vid_h = extract_poses(video_path)
 
-    # 1a. Scale calibration: use athlete height to convert pixel coords → metres
+    # 1a. Scale calibration: prefer multi-segment per-frame (Phase 9a) when
+    #     anthropometric segment lengths are supplied; fall back to legacy
+    #     single-frame nose-ankle otherwise.
     landmarks_3d = calibrate_landmarks_to_world(
         landmarks_2d, landmarks_3d_world, height_m,
         image_width=vid_w, image_height=vid_h,
+        thigh_length_m=thigh_length_m,
+        shank_length_m=shank_length_m,
     )
     logger.info(
         f"  Scale calibration applied: athlete height = {height_m:.2f}m, "
@@ -485,6 +534,13 @@ def analyze_video(
         report["session_date"] = session_date
     report["session_folder"] = video_path.parent.name
 
+    # 7. Cache the sample for personal-data fine-tuning, if requested
+    if samples_out_dir is not None:
+        samples_out_dir.mkdir(parents=True, exist_ok=True)
+        sample_path = samples_out_dir / f"{video_path.stem}.npz"
+        sample.save_npz(sample_path)
+        report["sample_npz"] = str(sample_path)
+
     return report
 
 
@@ -499,6 +555,18 @@ def main():
     parser.add_argument("--mass", type=float, default=67.0, help="Body mass in kg")
     parser.add_argument("--height", type=float, default=1.78, help="Height in metres")
     parser.add_argument(
+        "--thigh", type=float, default=0.43,
+        help="Measured hip→knee length in metres (Imogen: 0.43). "
+             "Enables Phase 9a multi-segment scale calibration. "
+             "Set to 0 to disable and fall back to nose-ankle.",
+    )
+    parser.add_argument(
+        "--shank", type=float, default=0.47,
+        help="Measured knee→ankle length in metres (Imogen: 0.47). "
+             "Enables Phase 9a multi-segment scale calibration. "
+             "Set to 0 to disable and fall back to nose-ankle.",
+    )
+    parser.add_argument(
         "--model", type=str,
         default="experiments/results/pretrain_dynamics/best_model.pth",
         help="Path to pre-trained PINN checkpoint",
@@ -507,10 +575,20 @@ def main():
         "--output", type=str, default=None,
         help="Output JSON path (default: data/results/<video_stem>_report.json)",
     )
+    parser.add_argument(
+        "--save-samples", type=str, default=None,
+        nargs="?", const="data/results/samples",
+        help="Cache extracted BiomechanicalSamples as .npz under the given "
+             "directory (defaults to data/results/samples when flag is bare). "
+             "Required input for scripts/finetune_personal.py.",
+    )
     args = parser.parse_args()
 
     input_path = Path(args.input)
     model_path = Path(args.model)
+    samples_dir = Path(args.save_samples) if args.save_samples else None
+    thigh_m = args.thigh if args.thigh and args.thigh > 0 else None
+    shank_m = args.shank if args.shank and args.shank > 0 else None
 
     video_files = collect_videos(input_path)
     if not video_files:
@@ -525,7 +603,10 @@ def main():
                 video_path,
                 body_mass_kg=args.mass,
                 height_m=args.height,
+                thigh_length_m=thigh_m,
+                shank_length_m=shank_m,
                 model_path=model_path,
+                samples_out_dir=samples_dir,
             )
             all_reports.append(report)
 
