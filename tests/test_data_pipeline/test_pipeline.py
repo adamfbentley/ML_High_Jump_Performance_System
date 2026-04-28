@@ -121,6 +121,41 @@ def test_sample_validate_missing_fps():
     assert any("fps" in w for w in warnings)
 
 
+def test_sample_save_load_roundtrip(tmp_path):
+    """save_npz → load_npz must recover all populated fields exactly."""
+    sample = _make_sample(n_frames=80, n_joints=8, has_dynamics=True, has_poses=True)
+    path = tmp_path / "sample.npz"
+    sample.save_npz(path)
+    loaded = BiomechanicalSample.load_npz(path)
+
+    assert loaded.dataset_name == sample.dataset_name
+    assert loaded.trial_id == sample.trial_id
+    assert loaded.movement_type == sample.movement_type
+    assert loaded.fps == sample.fps
+    assert loaded.joint_names == sample.joint_names
+    assert loaded.subject.body_mass_kg == sample.subject.body_mass_kg
+    assert loaded.subject.height_m == sample.subject.height_m
+    for attr in BiomechanicalSample._ARRAY_FIELDS:
+        original = getattr(sample, attr)
+        recovered = getattr(loaded, attr)
+        if original is None:
+            assert recovered is None
+        else:
+            np.testing.assert_array_equal(original, recovered)
+
+
+def test_sample_save_load_omits_none_arrays(tmp_path):
+    """Fields that are None on the source sample must remain None after load."""
+    sample = _make_sample(n_frames=10, has_dynamics=False, has_poses=False)
+    path = tmp_path / "sample.npz"
+    sample.save_npz(path)
+    loaded = BiomechanicalSample.load_npz(path)
+    assert loaded.grf is None
+    assert loaded.joint_torques is None
+    assert loaded.pose_2d is None
+    assert loaded.pose_3d is None
+
+
 def test_sample_validate_missing_mass():
     sample = _make_sample()
     sample.subject.body_mass_kg = None

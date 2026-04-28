@@ -7,8 +7,10 @@ BioCV, OpenCap, and any future datasets.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+from dataclasses import asdict, dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -226,6 +228,69 @@ class BiomechanicalSample:
         if self.frame_paths:
             sliced.frame_paths = self.frame_paths[start:end]
         return sliced
+
+    # ── Persistence ───────────────────────────────────────────────────────
+    # Used by analyze_jump_video.py to cache extracted kinematics next to the
+    # JSON report, and by scripts/finetune_personal.py to load them back for
+    # personal-data fine-tuning without re-running the pose pipeline.
+
+    _ARRAY_FIELDS = (
+        "joint_angles", "joint_angular_velocities", "joint_angular_accelerations",
+        "marker_positions", "com_position", "com_velocity", "com_acceleration",
+        "grf", "cop", "joint_torques", "pose_2d", "pose_3d",
+    )
+
+    def save_npz(self, path: str | Path) -> None:
+        """Serialise to a single compressed `.npz` (arrays + JSON metadata).
+
+        Loadable with `BiomechanicalSample.load_npz(path)`.
+        """
+        arrays = {
+            name: np.asarray(getattr(self, name))
+            for name in self._ARRAY_FIELDS
+            if getattr(self, name) is not None
+        }
+        meta = {
+            "dataset_name": self.dataset_name,
+            "trial_id": self.trial_id,
+            "movement_type": self.movement_type.value,
+            "fps": float(self.fps),
+            "joint_names": list(self.joint_names),
+            "marker_names": list(self.marker_names),
+            "pose_landmark_names": list(self.pose_landmark_names),
+            "frame_paths": list(self.frame_paths),
+            "subject": asdict(self.subject),
+            "session_context": (
+                asdict(self.session_context) if self.session_context is not None else None
+            ),
+            "_array_fields": list(arrays.keys()),
+        }
+        np.savez_compressed(path, _meta=np.array(json.dumps(meta)), **arrays)
+
+    @classmethod
+    def load_npz(cls, path: str | Path) -> "BiomechanicalSample":
+        """Inverse of `save_npz`."""
+        with np.load(path, allow_pickle=False) as data:
+            meta = json.loads(str(data["_meta"]))
+            arrays = {name: data[name] for name in meta["_array_fields"]}
+        subject = SubjectInfo(**meta["subject"])
+        session_ctx = (
+            SessionContext(**meta["session_context"])
+            if meta["session_context"] is not None else None
+        )
+        return cls(
+            dataset_name=meta["dataset_name"],
+            trial_id=meta["trial_id"],
+            subject=subject,
+            movement_type=MovementType(meta["movement_type"]),
+            fps=meta["fps"],
+            joint_names=meta["joint_names"],
+            marker_names=meta["marker_names"],
+            pose_landmark_names=meta["pose_landmark_names"],
+            frame_paths=meta["frame_paths"],
+            session_context=session_ctx,
+            **arrays,
+        )
 
     def validate(self) -> list[str]:
         """Check for common issues. Returns list of warnings."""

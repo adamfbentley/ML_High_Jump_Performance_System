@@ -9,6 +9,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from scripts.analyze_jump_video import generate_report
+from src.data_pipeline.sample import BiomechanicalSample, MovementType, SubjectInfo
 from src.kinematics.takeoff_analysis import (
     TakeoffMetrics,
     estimate_grf_from_com,
@@ -225,3 +227,71 @@ def test_compute_impulse_constant_force():
     # Trapezoidal integration: F * (N-1) * dt
     expected = 700.0 * (n - 1) / fps
     assert abs(impulse - expected) < 0.01   # floating-point tolerance only
+
+
+# ── Video report takeoff-frame selection ─────────────────────────────────
+
+def _make_video_sample_for_takeoff_frame_test(
+    *,
+    contact_slice: slice | None,
+    velocity_spike_frame: int,
+    true_takeoff_frame: int,
+) -> BiomechanicalSample:
+    """Synthetic calibrated video sample with ankle Y in metres."""
+    n = 30
+    fps = 100.0
+    pose_3d = np.zeros((n, 33, 3), dtype=float)
+    pose_3d[:, 27, 1] = 0.25
+    pose_3d[:, 28, 1] = 0.25
+    if contact_slice is not None:
+        pose_3d[contact_slice, 28, 1] = 0.02
+
+    com_position = np.zeros((n, 3), dtype=float)
+    com_position[:, 1] = np.linspace(1.0, 1.8, n)
+    com_velocity = np.zeros((n, 3), dtype=float)
+    com_velocity[:, 0] = 3.0
+    com_velocity[:, 1] = 0.5
+    com_velocity[true_takeoff_frame, 1] = 3.4
+    com_velocity[velocity_spike_frame, 1] = 20.0
+    grf = np.zeros((n, 3), dtype=float)
+    grf[:, 1] = 65.0 * 9.81
+
+    return BiomechanicalSample(
+        dataset_name="unit_test",
+        trial_id="synthetic_takeoff",
+        subject=SubjectInfo(subject_id="athlete", body_mass_kg=65.0, height_m=1.75),
+        movement_type=MovementType.HIGH_JUMP,
+        fps=fps,
+        com_position=com_position,
+        com_velocity=com_velocity,
+        grf=grf,
+        pose_3d=pose_3d,
+    )
+
+
+def test_generate_report_uses_last_ground_contact_for_takeoff_frame():
+    """Contact-anchored takeoff should ignore later single-frame vy spikes."""
+    sample = _make_video_sample_for_takeoff_frame_test(
+        contact_slice=slice(8, 12),
+        true_takeoff_frame=11,
+        velocity_spike_frame=20,
+    )
+
+    report = generate_report(sample, pinn_grf=None)
+
+    assert report["takeoff_frame"] == 11
+    assert report["velocity"]["takeoff_vertical_mps"] == 3.4
+
+
+def test_generate_report_falls_back_to_argmax_vy_without_ground_contacts():
+    """Very short or failed pose clips still produce a takeoff estimate."""
+    sample = _make_video_sample_for_takeoff_frame_test(
+        contact_slice=None,
+        true_takeoff_frame=11,
+        velocity_spike_frame=20,
+    )
+
+    report = generate_report(sample, pinn_grf=None)
+
+    assert report["takeoff_frame"] == 20
+    assert report["velocity"]["takeoff_vertical_mps"] == 20.0
