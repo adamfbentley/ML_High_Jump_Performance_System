@@ -51,7 +51,7 @@ def parse_bar_height(filename: str) -> float | None:
     """Extract bar height from filename like '06_03_24_one_1.78.mp4' → 1.78."""
     import re
     # Match decimal like _1.78 or _1.88 before the extension
-    m = re.search(r'_(\d+\.\d+)(?:\.[a-zA-Z]+)?$', filename)
+    m = re.search(r'_(\d+\.\d+)(?:\.[a-zA-Z0-9]+)?$', filename)
     return float(m.group(1)) if m else None
 
 

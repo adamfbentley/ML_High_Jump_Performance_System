@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from scripts.analyze_jump_video import generate_report
+from scripts.analyze_jump_video import generate_report, parse_bar_height
 from src.data_pipeline.sample import BiomechanicalSample, MovementType, SubjectInfo
 from src.kinematics.takeoff_analysis import (
     TakeoffMetrics,
@@ -295,3 +295,7 @@ def test_generate_report_falls_back_to_argmax_vy_without_ground_contacts():
 
     assert report["takeoff_frame"] == 20
     assert report["velocity"]["takeoff_vertical_mps"] == 20.0
+
+
+def test_parse_bar_height_accepts_numeric_video_extension():
+    assert parse_bar_height("session_attempt_1.88.mp4") == 1.88
