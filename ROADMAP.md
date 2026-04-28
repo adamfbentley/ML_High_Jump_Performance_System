@@ -258,8 +258,8 @@ of the scale-calibration fix.
     fundamental — single-camera resolution is the limit. At this point in the
     timeline, the vy=38 m/s artifact was also influenced by the pre-9b
     `argmax(vy)` takeoff selector picking transient spikes.
-- Current full non-PINN suite is 187 passing after 9a/9b and bar-height parser
-  fixes.
+- Current full non-PINN suite is 190 passing after 9a/9b, bar-height parser
+  fixes, and local RAG tooling tests.
 
 **Phase 9b — ground-contact takeoff anchor**
 - `scripts/analyze_jump_video.py` now selects takeoff as the final frame of
@@ -272,7 +272,7 @@ of the scale-calibration fix.
 - Added regression tests in `tests/test_kinematics/test_takeoff.py` showing the
   report ignores a later one-frame vertical-velocity spike and still falls back
   when no contact interval is available.
-- Full non-PINN test suite now reports **187 passing**.
+- Full non-PINN test suite now reports **190 passing**.
 - Bar-height metadata parsing now accepts numeric video extensions (e.g. `.mp4`).
 
 **Phase 9-final validation — full 45-video re-process**
@@ -293,6 +293,22 @@ of the scale-calibration fix.
   scene-fixed. Takeoff horizontal velocity median is 1.08 m/s (2/45 in
   2.5-5.5 m/s), while peak horizontal velocity is noisy in the opposite
   direction. This keeps takeoff-angle outputs unreliable even after 9b.
+
+**Workspace memory tooling — local RAG**
+- Added `memory/` as the file-mediated collaboration area for Claude/Codex:
+  tracked notes, plans, open questions, and aggregate experiment summaries.
+- Added `tools/memory/build_index.py` and `tools/memory/query_index.py`.
+  They use ChromaDB as a local vector store and deterministic local hashing
+  embeddings, avoiding external embedding calls.
+- Added `tools/memory/config.yaml` with explicit private-data excludes:
+  `data/**`, private athlete references, business notes, generated logs, and
+  vector-index artifacts are not indexed by default.
+- Added 3 tests in `tests/test_tools/test_memory_rag.py` for embedding
+  determinism, chunk metadata, and private-data exclusion.
+- Verified:
+  `.venv/Scripts/python.exe tools/memory/build_index.py --reset` indexed
+  269 chunks from 84 files; a sample query returned Phase 9 context from
+  `ROADMAP.md` and related source files.
 
 **Context files refresh**
 - `.github/copilot-instructions.md`: refreshed phase list to reflect Phase 9
@@ -326,7 +342,7 @@ After the 9a/9b fixes, **0/45** reports have negative takeoff angles or velociti
 - **Symptom:** on the plausible-scale subset (peak CoM < 3 m), the median takeoff angle came out at 79° — too steep. This is partly a real Fosbury-Flop signature (high vy, low vh at toe-off) but is exaggerated by the takeoff frame sometimes landing on a single-frame velocity spike where vh has been noise-suppressed near zero.
 - **Root cause:** `np.gradient(com_position)` amplifies the residual jitter left by the 10 Hz Butterworth filter; `argmax(vy)` then sometimes picks a 1-frame spike rather than the impulse peak.
 - **Fix:** `scripts/analyze_jump_video.py` anchors takeoff to ground contact instead of velocity. It runs `src/kinematics/run_up_analysis.py:detect_ground_contacts` on both ankle trajectories and reads `com_velocity` at the final frame of the final pre-peak contact interval. If no contact is detected, it falls back to `argmax(vy)`.
-- **Validation:** `tests/test_kinematics/test_takeoff.py` covers the noise-spike case, no-contact fallback, and bar-height parsing. Full suite: 187 passing with `tests/test_pinn` ignored.
+- **Validation:** `tests/test_kinematics/test_takeoff.py` covers the noise-spike case, no-contact fallback, and bar-height parsing. Full suite: 190 passing with `tests/test_pinn` ignored.
 
 #### 9c. Optimisation results are stale relative to corrected reports
 
@@ -347,7 +363,7 @@ After the 9a/9b fixes, **0/45** reports have negative takeoff angles or velociti
 | Differentiable optimiser + sensitivity analysis | ✅ Complete and tested |
 | Video analysis end-to-end pipeline | ✅ Complete (takeoff-detection bug fixed Phase 9) |
 | Athlete priority metrics (Imogen alignment) | ✅ Implemented |
-| Test suite | ✅ 187 tests passing (`tests/test_pinn` ignored) |
+| Test suite | ✅ 190 tests passing (`tests/test_pinn` ignored) |
 | Public datasets downloaded (Zenodo CMJ, CoD, DVJ) | ✅ Done |
 | PINN pre-training run (3000 epochs) | ✅ Done — `final_model.pth` saved |
 | Imogen's 45 jump videos processed | ✅ Re-processed Phase 9a/9b with 45 cached samples |

@@ -1,0 +1,50 @@
+index_path: memory/vector_index/chroma
+collection_name: high_jump_memory
+
+chunk_chars: 2600
+chunk_overlap_chars: 300
+
+embedding:
+  type: hashing
+  dimensions: 2048
+
+include_globs:
+  - CLAUDE.md
+  - ROADMAP.md
+  - ARCHITECTURE.md
+  - HANDOFF.md
+  - README.md
+  - pyproject.toml
+  - .github/copilot-instructions.md
+  - memory/docs/**/*.md
+  - memory/plans/**/*.md
+  - memory/experiments/**/*.md
+  - src/**/*.py
+  - scripts/**/*.py
+  - tests/**/*.py
+  - experiments/configs/**/*.yaml
+  - experiments/configs/**/*.yml
+
+exclude_globs:
+  - .git/**
+  - .venv/**
+  - __pycache__/**
+  - .pytest_cache/**
+  - data/**
+  - memory/vector_index/**
+  - memory/logs/**
+  - services_scaffold/**
+  - notebooks/**
+  - business/**
+  - imogens_response- to-questions/**
+  - questions to imogen.md
+  - EMAIL_FOR_IMOGEN.md
+  - CLAUDE_ONBOARDING.md
+  - "*.pth"
+  - "*.pt"
+  - "*.ckpt"
+  - "*.onnx"
+  - "*.mp4"
+  - "*.mov"
+  - "*.avi"
+  - "*.mkv"

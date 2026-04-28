@@ -86,6 +86,12 @@ Desktop.ini
 AGENTS.md
 CLAUDE_ONBOARDING.md
 
+# ---- Local RAG memory artifacts ----
+memory/vector_index/
+memory/logs/*.jsonl
+memory/logs/*.log
+!memory/logs/.gitkeep
+
 # ---- Athlete private data ----
 imogens_response- to-questions/
 questions to imogen.md

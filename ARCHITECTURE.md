@@ -38,7 +38,9 @@ scripts/
   download_datasets.py
   render_pose_overlay.py
 
-tests/                  187 non-PINN tests currently passing
+tests/                  190 non-PINN tests currently passing
+tools/memory/           Local RAG build/query scripts for agent context
+memory/                 Tracked notes/plans/experiments plus ignored vector index
 experiments/configs/    Training configuration
 experiments/results/    Pre-training outputs and checkpoints
 data/                   Private videos/results plus public datasets; mostly gitignored
@@ -175,6 +177,27 @@ be trusted.
 | `scripts/download_datasets.py` | Print manual public-dataset download instructions. |
 | `scripts/render_pose_overlay.py` | Render pose overlays for inspection. |
 
+## Local Agent Memory
+
+`memory/` and `tools/memory/` implement the lightweight local RAG workflow for
+Claude/Codex collaboration.
+
+- `memory/docs/`: architecture notes, physics notes, equations, decisions, open
+  questions.
+- `memory/plans/`: current Opus plan and Codex execution notes.
+- `memory/experiments/`: aggregate experiment summaries safe to share between
+  agents.
+- `memory/vector_index/`: generated ChromaDB index, ignored by git.
+- `tools/memory/build_index.py`: chunks configured project files and builds the
+  local vector index.
+- `tools/memory/query_index.py`: retrieves relevant file/line snippets for a
+  task.
+
+The index uses deterministic local hashing embeddings. This is intentionally
+less powerful than a transformer embedding but avoids external calls and private
+code leakage. Private athlete data and generated report folders are excluded by
+default in `tools/memory/config.yaml`.
+
 ## Current Phase
 
 Phase 9a and 9b are implemented and tested:
@@ -183,7 +206,7 @@ Phase 9a and 9b are implemented and tested:
 - Phase 9b: contact-anchored takeoff-frame selection.
 - Bar-height parsing fixed for numeric extensions such as `.mp4`.
 - Full private reprocess completed: 45/45 reports and 45/45 cached samples.
-- Full non-PINN suite: 187 passing.
+- Full non-PINN suite: 190 passing.
 
 Phase 10 personal fine-tuning is blocked. Aggregate reprocess metrics are not
 training-grade:
@@ -208,7 +231,7 @@ Run the non-PINN suite with:
 .venv/Scripts/python.exe -m pytest tests/ --ignore=tests/test_pinn -q
 ```
 
-Current result: 187 passing. Test coverage includes data pipeline roundtrips,
+Current result: 190 passing. Test coverage includes data pipeline roundtrips,
 scale calibration, kinematics, optimiser behavior, pose skeleton utilities,
 landmark post-processing, parsers, and physics-law checks.
 
