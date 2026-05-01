@@ -39,7 +39,11 @@ from src.pose_estimation.skeleton.landmark_postprocessor import (
     postprocess_landmarks,
 )
 from src.pose_estimation.opensim_ik import is_opensim_available, run_opensim_ik
-from src.pose_estimation.scale_calibration import calibrate_landmarks_to_world
+from src.pose_estimation.scale_calibration import (
+    calibrate_landmarks_to_world,
+    calibrate_landmarks_with_scene,
+)
+from src.pose_estimation.scene_calibration import detect_scene_anchors
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
@@ -335,6 +339,7 @@ def generate_report(
     sample: BiomechanicalSample,
     pinn_grf: np.ndarray | None,
     bar_height_m: float | None = None,
+    calibration_info: dict | None = None,
 ) -> dict:
     """Generate a summary report of the jump analysis."""
     mass = sample.subject.body_mass_kg
@@ -409,6 +414,11 @@ def generate_report(
             "peak_vertical_N": round(peak_vertical_grf, 1),
             "peak_vertical_BW": round(peak_grf_bw, 2),
         },
+        "calibration": calibration_info or {
+            "method": "anatomical",
+            "anchor_coverage_pct": 0.0,
+            "scene_anatomical_scale_ratio": None,
+        },
         "takeoff_frame": int(takeoff_frame),
         **pinn_metrics,
     }
@@ -441,6 +451,7 @@ def analyze_video(
     shank_length_m: float | None = None,
     model_path: Path | None = None,
     samples_out_dir: Path | None = None,
+    use_scene_anchor: bool = False,
 ) -> dict:
     """Run the full analysis pipeline on a single video.
 
@@ -456,16 +467,43 @@ def analyze_video(
 
     # 1. Pose estimation (2D normalised + 3D world)
     landmarks_2d, landmarks_3d_world, fps, vid_w, vid_h = extract_poses(video_path)
+    bar_height = parse_bar_height(video_path.name)
 
     # 1a. Scale calibration: prefer multi-segment per-frame (Phase 9a) when
     #     anthropometric segment lengths are supplied; fall back to legacy
     #     single-frame nose-ankle otherwise.
-    landmarks_3d = calibrate_landmarks_to_world(
-        landmarks_2d, landmarks_3d_world, height_m,
-        image_width=vid_w, image_height=vid_h,
-        thigh_length_m=thigh_length_m,
-        shank_length_m=shank_length_m,
-    )
+    calibration_info: dict
+    if use_scene_anchor:
+        scene_anchors = detect_scene_anchors(video_path, bar_height_m=bar_height)
+        landmarks_3d, calibration_info = calibrate_landmarks_with_scene(
+            landmarks_2d,
+            landmarks_3d_world,
+            height_m,
+            image_width=vid_w,
+            image_height=vid_h,
+            thigh_length_m=thigh_length_m,
+            shank_length_m=shank_length_m,
+            scene_anchors=scene_anchors,
+        )
+        logger.info(
+            "  Scene calibration: method=%s, anchor coverage=%.1f%%, "
+            "scene/anatomical scale=%s",
+            calibration_info.get("method"),
+            calibration_info.get("anchor_coverage_pct", 0.0),
+            calibration_info.get("scene_anatomical_scale_ratio"),
+        )
+    else:
+        landmarks_3d = calibrate_landmarks_to_world(
+            landmarks_2d, landmarks_3d_world, height_m,
+            image_width=vid_w, image_height=vid_h,
+            thigh_length_m=thigh_length_m,
+            shank_length_m=shank_length_m,
+        )
+        calibration_info = {
+            "method": "anatomical",
+            "anchor_coverage_pct": 0.0,
+            "scene_anatomical_scale_ratio": None,
+        }
     logger.info(
         f"  Scale calibration applied: athlete height = {height_m:.2f}m, "
         f"CoM Y range = {landmarks_3d[:, :, 1].min():.2f}–"
@@ -525,8 +563,12 @@ def analyze_video(
         pinn_grf = run_pinn_inference(sample, model_path)
 
     # 5. Generate report
-    bar_height = parse_bar_height(video_path.name)
-    report = generate_report(sample, pinn_grf, bar_height_m=bar_height)
+    report = generate_report(
+        sample,
+        pinn_grf,
+        bar_height_m=bar_height,
+        calibration_info=calibration_info,
+    )
 
     # 6. Add session metadata
     session_date = parse_session_date(video_path)
@@ -545,6 +587,8 @@ def analyze_video(
 
 
 def main():
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(
         description="Analyse high jump video(s) end-to-end"
     )
@@ -582,6 +626,11 @@ def main():
              "directory (defaults to data/results/samples when flag is bare). "
              "Required input for scripts/finetune_personal.py.",
     )
+    parser.add_argument(
+        "--scene-anchor", choices=("on", "off"), default="off",
+        help="Opt-in Phase 9c crossbar/upright scene calibration. Default off "
+             "keeps the approved Phase 9a anatomical scale path.",
+    )
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -607,6 +656,7 @@ def main():
                 shank_length_m=shank_m,
                 model_path=model_path,
                 samples_out_dir=samples_dir,
+                use_scene_anchor=args.scene_anchor == "on",
             )
             all_reports.append(report)
 

@@ -29,8 +29,17 @@ per-frame median across multiple segments rejects naturally.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 
 import numpy as np
+
+from src.pose_estimation.scene_calibration import (
+    SceneAnchors,
+    estimate_scene_scale_mpp,
+    fit_per_frame_homography,
+    homography_valid_mask,
+    warp_landmarks_to_scene,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -366,3 +375,216 @@ def calibrate_landmarks_to_world(
     calibrated[:, :, 3] = landmarks_2d[:, :, 2]  # visibility
 
     return calibrated
+
+
+def _landmarks_to_pixel_space(
+    landmarks_2d: np.ndarray,
+    image_width: int,
+    image_height: int,
+) -> np.ndarray:
+    """Convert normalised BlazePose landmarks to pixel x/y/visibility."""
+    landmarks_px = np.zeros_like(landmarks_2d, dtype=np.float64)
+    landmarks_px[:, :, 0] = landmarks_2d[:, :, 0].astype(np.float64) * image_width
+    landmarks_px[:, :, 1] = landmarks_2d[:, :, 1].astype(np.float64) * image_height
+    landmarks_px[:, :, 2] = landmarks_2d[:, :, 2]
+    return landmarks_px
+
+
+def _estimate_bar_height_from_anatomical_scale(
+    anchors: SceneAnchors,
+    anatomical_mpp: float,
+) -> float | None:
+    """Estimate bar height when filename metadata is unavailable.
+
+    This keeps scene-anchor pan correction available on untagged clips while
+    marking the vertical scene scale as anatomical-derived rather than
+    filename-derived.
+    """
+    if anatomical_mpp <= 0 or not np.isfinite(anatomical_mpp):
+        return None
+    heights_px: list[float] = []
+    anchor_pairs = (
+        (anchors.upright_left_base_px, anchors.upright_left_top_px),
+        (anchors.upright_right_base_px, anchors.upright_right_top_px),
+    )
+    for base_arr, top_arr in anchor_pairs:
+        if base_arr is None or top_arr is None:
+            continue
+        base = np.asarray(base_arr, dtype=np.float64)
+        top = np.asarray(top_arr, dtype=np.float64)
+        valid = np.isfinite(base).all(axis=1) & np.isfinite(top).all(axis=1)
+        pixel_heights = base[valid, 1] - top[valid, 1]
+        heights_px.extend(float(v) for v in pixel_heights if v > 1.0)
+    if not heights_px:
+        return None
+    height_m = float(np.median(heights_px) * anatomical_mpp)
+    if 0.8 <= height_m <= 2.5:
+        return height_m
+    return None
+
+
+def _anatomical_scale_mpp_for_info(
+    landmarks_2d: np.ndarray,
+    height_m: float,
+    image_width: int,
+    image_height: int,
+    thigh_length_m: float | None,
+    shank_length_m: float | None,
+) -> tuple[np.ndarray, dict]:
+    """Return the anatomical mpp series used for diagnostics."""
+    per_frame_mpp, info = compute_per_frame_scale_mpp(
+        landmarks_2d,
+        image_width=image_width,
+        image_height=image_height,
+        thigh_length_m=thigh_length_m,
+        shank_length_m=shank_length_m,
+    )
+    if per_frame_mpp is None:
+        scale_y = compute_scale_factor(landmarks_2d, height_m)
+        per_frame_mpp = np.full(landmarks_2d.shape[0], scale_y / image_height, dtype=np.float64)
+    return per_frame_mpp, info
+
+
+def _densify_homographies(
+    homographies: np.ndarray,
+    valid_mask: np.ndarray,
+) -> np.ndarray:
+    """Linearly fill invalid homography frames from nearest valid neighbours."""
+    if homographies.ndim != 3 or homographies.shape[1:] != (3, 3):
+        raise ValueError("homographies must have shape (T, 3, 3)")
+    valid = np.asarray(valid_mask, dtype=bool)
+    if valid.shape != (homographies.shape[0],):
+        raise ValueError("valid_mask must have shape (T,)")
+    if not np.any(valid):
+        return homographies.copy()
+
+    frame_idx = np.arange(homographies.shape[0], dtype=np.float64)
+    valid_idx = frame_idx[valid]
+    dense = np.empty_like(homographies, dtype=np.float64)
+    for row in range(3):
+        for col in range(3):
+            values = homographies[valid, row, col]
+            dense[:, row, col] = np.interp(frame_idx, valid_idx, values)
+
+    denom = dense[:, 2, 2]
+    normalisable = np.isfinite(dense).all(axis=(1, 2)) & (np.abs(denom) > 1e-12)
+    dense[normalisable] = dense[normalisable] / denom[normalisable, None, None]
+    return dense
+
+
+def calibrate_landmarks_with_scene(
+    landmarks_2d: np.ndarray,
+    landmarks_3d_world: np.ndarray,
+    height_m: float,
+    *,
+    image_width: int = 1920,
+    image_height: int = 1080,
+    thigh_length_m: float | None = None,
+    shank_length_m: float | None = None,
+    scene_anchors: SceneAnchors | None = None,
+    min_anchor_confidence: float = 0.5,
+) -> tuple[np.ndarray, dict]:
+    """Calibrate landmarks, preferring scene homography when reliable.
+
+    The existing anatomical calibration remains the fallback for all frames.
+    Scene homography is accepted or rejected at clip level so X/Y never switch
+    coordinate systems frame-by-frame.  Z remains the BlazePose-depth-derived
+    anatomical fallback when the scene path is accepted.
+
+    Returns:
+        ``(calibrated_landmarks, calibration_info)``.
+    """
+    fallback = calibrate_landmarks_to_world(
+        landmarks_2d,
+        landmarks_3d_world,
+        height_m,
+        image_width=image_width,
+        image_height=image_height,
+        thigh_length_m=thigh_length_m,
+        shank_length_m=shank_length_m,
+    )
+    info: dict = {
+        "method": "anatomical",
+        "anchor_coverage_pct": 0.0,
+        "scene_anatomical_scale_ratio": None,
+        "scene_anchor_decision_reason": "coverage_below_threshold",
+    }
+    if scene_anchors is None:
+        return fallback, info
+
+    anatomical_mpp, scale_info = _anatomical_scale_mpp_for_info(
+        landmarks_2d,
+        height_m,
+        image_width,
+        image_height,
+        thigh_length_m,
+        shank_length_m,
+    )
+    bar_height_source = "filename" if scene_anchors.bar_height_m is not None else "none"
+    anchors_for_fit = scene_anchors
+    if scene_anchors.bar_height_m is None:
+        estimated_bar_height = _estimate_bar_height_from_anatomical_scale(
+            scene_anchors,
+            float(np.nanmedian(anatomical_mpp)),
+        )
+        if estimated_bar_height is not None:
+            anchors_for_fit = replace(scene_anchors, bar_height_m=estimated_bar_height)
+            bar_height_source = "anatomical_estimate"
+
+    homographies = fit_per_frame_homography(anchors_for_fit)
+    n_frames = min(fallback.shape[0], homographies.shape[0])
+    valid = homography_valid_mask(
+        homographies[:n_frames],
+        confidence=anchors_for_fit.confidence[:n_frames],
+        min_confidence=min_anchor_confidence,
+    )
+
+    scene_mpp = estimate_scene_scale_mpp(anchors_for_fit)[:n_frames]
+    ratio = None
+    ratio_valid = valid & np.isfinite(scene_mpp) & np.isfinite(anatomical_mpp[:n_frames])
+    ratio_valid &= anatomical_mpp[:n_frames] > 0
+    if np.any(ratio_valid):
+        ratio = float(np.nanmedian(scene_mpp[ratio_valid] / anatomical_mpp[:n_frames][ratio_valid]))
+
+    coverage = float(np.mean(valid)) if n_frames else 0.0
+    if coverage < 0.60:
+        decision_reason = "coverage_below_threshold"
+    elif ratio is None or not (0.8 <= ratio <= 1.2):
+        decision_reason = "ratio_out_of_range"
+    else:
+        decision_reason = "accepted"
+
+    info.update(
+        {
+            "anchor_coverage_pct": round(coverage * 100.0, 2),
+            "scene_anatomical_scale_ratio": ratio,
+            "scene_anchor_decision_reason": decision_reason,
+            "bar_height_source": bar_height_source,
+            "bar_height_m": anchors_for_fit.bar_height_m,
+            "anatomical_scale_mpp": float(np.nanmedian(anatomical_mpp)),
+            "scene_scale_mpp": (
+                float(np.nanmedian(scene_mpp)) if np.isfinite(scene_mpp).any() else None
+            ),
+            "scale_info": scale_info,
+        }
+    )
+    if decision_reason != "accepted":
+        return fallback, info
+
+    landmarks_px = _landmarks_to_pixel_space(landmarks_2d[:n_frames], image_width, image_height)
+    dense_homographies = _densify_homographies(homographies[:n_frames], valid)
+    scene_xy = warp_landmarks_to_scene(
+        landmarks_px,
+        dense_homographies,
+        np.ones(n_frames, dtype=bool),
+    )
+
+    calibrated = fallback.copy()
+    for t in range(n_frames):
+        finite = np.isfinite(scene_xy[t, :, 0]) & np.isfinite(scene_xy[t, :, 1])
+        calibrated[t, finite, 0] = scene_xy[t, finite, 0].astype(np.float32)
+        calibrated[t, finite, 1] = scene_xy[t, finite, 1].astype(np.float32)
+        calibrated[t, :, 3] = landmarks_2d[t, :, 2]
+
+    info["method"] = "scene_homography"
+    return calibrated, info
