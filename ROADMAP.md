@@ -363,41 +363,85 @@ After the 9a/9b fixes, **0/45** reports have negative takeoff angles or velociti
 | Differentiable optimiser + sensitivity analysis | ✅ Complete and tested |
 | Video analysis end-to-end pipeline | ✅ Complete (takeoff-detection bug fixed Phase 9) |
 | Athlete priority metrics (Athlete A alignment) | ✅ Implemented |
-| Test suite | ✅ 190 tests passing (`tests/test_pinn` ignored) |
+| Test suite | ✅ 214 tests passing (`tests/test_pinn` ignored) |
 | Public datasets downloaded (Zenodo CMJ, CoD, DVJ) | ✅ Done |
 | PINN pre-training run (3000 epochs) | ✅ Done — `final_model.pth` saved |
 | Athlete A's 45 jump videos processed | ✅ Re-processed Phase 9a/9b with 45 cached samples |
 | Takeoff detection (frame selection) | ✅ Fixed — contact-anchored takeoff with velocity fallback |
 | Takeoff detection (noise robustness) | ✅ Phase 9b implemented and tested |
-| Single-camera scale calibration | ⚠ Improved, but absolute translational metrics still not training-grade |
+| Single-camera scale calibration | ⚠ Phase 9c shipped (egomotion, scene_homography opt-in). Egomotion narrows but does not close the takeoff-vh gap. Phase 9d (apparatus-anchored mpp) is next. |
+| Hand-label evaluation infrastructure | ✅ Phase 9c — label tool, truth evaluator with takeoff-window comparison, 5 bar-tagged clips labelled |
 | AddBiomechanics dataset downloaded | ⬜ Pending (highest-quality GRF pre-training data) |
 | Personal data fine-tuning loop | ⬜ Pending (no fine-tuned model yet) |
 
 ---
 
+## Phase 9c — Scene Calibration and Egomotion (May 2026)
+
+**Commits:** `327fb00` and follow-ups (uncommitted at time of writing).
+
+**What shipped:**
+
+- `src/pose_estimation/scene_calibration.py` — Hough-based apparatus detector
+  (uprights + crossbar), per-frame image→bar-plane homography, sparse
+  Lucas-Kanade gap fill.
+- `src/pose_estimation/egomotion.py` — masked-athlete background optical flow,
+  partial-affine RANSAC, cumulative camera-motion transforms.
+- `src/pose_estimation/scale_calibration.py::calibrate_landmarks_with_scene` —
+  clip-level acceptance gates routing between anatomical / egomotion /
+  scene_homography. Egomotion accepted on coverage ≥0.60 and median confidence
+  ≥0.60. Scene homography accepted only on coverage ≥0.60 *and* scene/anatomical
+  ratio ∈ [0.8, 1.2]. Anatomical is the always-available fallback.
+- `scripts/analyze_jump_video.py` — `--scene-anchor` and `--egomotion` opt-in
+  flags, per-clip `quality` block, per-mode report routing.
+- 27 new bar-tagged unknown-date videos added; private corpus now 72 videos.
+
+**Validation tooling:**
+
+- `scripts/probe_scene_anchors.py` — local QA, annotated PNGs.
+- `scripts/label_scene_anchors.py` — hand-label tool (4 corners × N frames),
+  `s` to skip frames without visible apparatus, partial-work autosave,
+  tolerates cv2 frame-count quirks.
+- `scripts/evaluate_calibration_truth.py` — compares anatomical, egomotion, and
+  detector-fitted scene_homography against hand-labelled truth at the takeoff
+  window. Truth path bypasses the scene/anatomical ratio gate so biased
+  anatomical mpp can't silently turn the reference back into anatomical.
+- `scripts/aggregate_calibration_modes.py` — three-mode aggregator with
+  canonical Phase 10 gates and pass-count ranking.
+
+**Hand-label evaluation findings (5 clips, exp_003):**
+
+- Auto-detector rejected on every clip — Hough finds wrong vertical edges.
+- Egomotion clearly beats anatomical on takeoff vh on most clips.
+- A residual ~1 m/s underestimate persists *even on the tripod control* — this
+  is a depth/mpp calibration bias, not a panning issue.
+- Truth values at takeoff fall mostly in the 2.5-5.5 m/s elite band, contrary
+  to the earlier "median 1.08 m/s blocker" framing which was per-frame
+  noise-dominated on anatomical-only output.
+
+See `memory/experiments/exp_003_hand_label_evaluation.md` for the aggregate
+findings (no per-clip private values).
+
+---
+
 ## Upcoming Work
 
-### Immediate
+### Phase 9d — Apparatus-Anchored Mpp at Takeoff Zone
 
-1. Resolve the remaining translational-metric blocker before Phase 10:
-   panned single-camera footage does not provide scene-fixed horizontal
-   displacement, so takeoff horizontal velocity and takeoff angle are unreliable.
-2. Add a fixed scene reference path (crossbar/uprights or homography) or move to
-   two-camera DLT for future filming; then re-run the 45-video cache.
-3. Review the peak-CoM validation target with the BMS PhD student: the
-   bar-tagged subset's CoM-minus-bar distribution looks more plausible than the
-   handoff's 2.0-2.7 m absolute range implies.
-4. Only after the above, run `scripts/finetune_personal.py --dry-run`, then
-   fine-tune if enough samples survive the guardrails.
+The remaining ~1 m/s residual on the tripod control isolates the next blocker:
+anatomical mpp underestimates true scale at the takeoff zone. Use the labelled
+upright separation (4.02 m, IAAF spec) as a third independent scale source,
+calibrated specifically at the takeoff frame. Plan in
+`memory/plans/opus_plan_current.md`.
 
 ### Phase 10 — Personal Data Fine-Tuning
 
-- `scripts/finetune_personal.py` exists, but fine-tuning is blocked until
-  extracted translational metrics are validated.
-- Validate fine-tuned model predictions against held-out jump attempts
-- Run `scripts/optimize_jump.py` on Athlete A's full dataset to generate personalised intervention rankings
+- Gated on Phase 9d validation against the tripod and 4 bar-tagged labelled
+  clips.
+- `scripts/finetune_personal.py` exists; do not run until 9d acceptance hits.
 
 ### Phase 11 — Validation and Paper
-- Compare predicted vs. measured jump heights on held-out attempts
-- Confirm sensitivity analysis marginal gains are plausible against coaching intuition
-- Write up methods and results
+
+- Compare predicted vs. measured jump heights on held-out attempts.
+- Confirm sensitivity analysis marginal gains are plausible against coaching intuition.
+- Write up methods and results.

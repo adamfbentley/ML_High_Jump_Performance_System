@@ -96,3 +96,7 @@ memory/logs/*.log
 athlete_as_response- to-questions/
 questions to athlete_a.md
 EMAIL_FOR_ATHLETE_A.md
+
+# ---- Private business/strategy notes ----
+business/
+potential valuation.md
