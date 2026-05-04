@@ -33,11 +33,17 @@ from dataclasses import replace
 
 import numpy as np
 
+from src.pose_estimation.egomotion import (
+    CameraMotion,
+    camera_motion_valid_mask,
+    warp_landmarks_remove_camera_motion,
+)
 from src.pose_estimation.scene_calibration import (
     SceneAnchors,
     estimate_scene_scale_mpp,
     fit_per_frame_homography,
     homography_valid_mask,
+    scene_anchor_diagnostics,
     warp_landmarks_to_scene,
 )
 
@@ -307,7 +313,7 @@ def calibrate_landmarks_to_world(
     Returns:
         calibrated_3d: (T, 33, 4) — (x_metres, y_metres, z_metres, visibility)
     """
-    T, J = landmarks_2d.shape[0], landmarks_2d.shape[1]
+    T = landmarks_2d.shape[0]
 
     # 1. Compute per-frame metres-per-pixel scale.
     per_frame_mpp, info = compute_per_frame_scale_mpp(
@@ -335,46 +341,14 @@ def calibrate_landmarks_to_world(
             f"(median across segments). Per-seg: {seg_summary}"
         )
 
-    # 2. Per-frame conversion of normalised coords → metres.
-    mpp = per_frame_mpp[:, None]  # (T, 1) for broadcasting over landmarks
-    x_m = landmarks_2d[:, :, 0].astype(np.float64) * image_width * mpp
-    y_m = (1.0 - landmarks_2d[:, :, 1].astype(np.float64)) * image_height * mpp
-
-    # 3. Ground reference: 5th percentile of ankle Y across the video, taken
-    #    from frames where the ankle landmark has high visibility.  Using
-    #    `min()` was unsafe: a single outlier frame (tracking error pushing an
-    #    ankle landmark off-frame) corrupted ground level by metres, which
-    #    then inflated *every* downstream Y including peak CoM.  The 5th
-    #    percentile gives essentially-the-minimum across well-tracked ground
-    #    contacts while rejecting solitary outliers.
-    ankle_vis = landmarks_2d[:, [27, 28], 2]  # (T, 2)
-    ankle_y_pair = y_m[:, [27, 28]]           # (T, 2)
-    visible_ankle_y = ankle_y_pair[ankle_vis >= 0.5]
-    if visible_ankle_y.size > 0:
-        ground_level = float(np.percentile(visible_ankle_y, 5.0))
-    else:
-        ground_level = float(np.percentile(ankle_y_pair, 5.0))
-    y_m -= ground_level
-
-    # 4. Rescale world-landmark depth (z) so its vertical span matches ours.
-    world_y = landmarks_3d_world[:, :, 1]  # hip-centred, y-axis
-    world_span = float(world_y.max() - world_y.min())
-    calib_span = float(y_m.max() - y_m.min())
-    if world_span > 1e-6 and calib_span > 1e-6:
-        depth_scale = calib_span / world_span
-    else:
-        # Fallback: use median mpp · image_height as a coarse depth scale.
-        depth_scale = float(np.nanmedian(per_frame_mpp) * image_height)
-    z_m = landmarks_3d_world[:, :, 2].astype(np.float64) * depth_scale
-
-    # 5. Pack into (T, 33, 4) with visibility from 2D.
-    calibrated = np.zeros((T, J, 4), dtype=np.float32)
-    calibrated[:, :, 0] = x_m.astype(np.float32)
-    calibrated[:, :, 1] = y_m.astype(np.float32)
-    calibrated[:, :, 2] = z_m.astype(np.float32)
-    calibrated[:, :, 3] = landmarks_2d[:, :, 2]  # visibility
-
-    return calibrated
+    landmarks_px = _landmarks_to_pixel_space(landmarks_2d, image_width, image_height)
+    return _calibrate_pixel_landmarks_to_world(
+        landmarks_2d,
+        landmarks_3d_world,
+        landmarks_px,
+        per_frame_mpp,
+        image_height=image_height,
+    )
 
 
 def _landmarks_to_pixel_space(
@@ -388,6 +362,60 @@ def _landmarks_to_pixel_space(
     landmarks_px[:, :, 1] = landmarks_2d[:, :, 1].astype(np.float64) * image_height
     landmarks_px[:, :, 2] = landmarks_2d[:, :, 2]
     return landmarks_px
+
+
+def _calibrate_pixel_landmarks_to_world(
+    landmarks_2d: np.ndarray,
+    landmarks_3d_world: np.ndarray,
+    landmarks_px: np.ndarray,
+    per_frame_mpp: np.ndarray,
+    *,
+    image_height: int,
+) -> np.ndarray:
+    """Pack pixel-space x/y landmarks into the canonical metres coordinate frame."""
+    n_frames, n_joints = landmarks_2d.shape[0], landmarks_2d.shape[1]
+    mpp = per_frame_mpp[:n_frames, None]
+    source_px = np.asarray(landmarks_px[:n_frames], dtype=np.float64)
+    x_m = source_px[:, :, 0] * mpp
+    y_m = (image_height - source_px[:, :, 1]) * mpp
+
+    # 5th-percentile visible ankle reference preserves the Phase 9a ground
+    # convention while allowing x/y pixels to come from an egomotion-warped
+    # frame-0 reference.
+    ankle_vis = landmarks_2d[:n_frames, [27, 28], 2]
+    ankle_y_pair = y_m[:, [27, 28]]
+    visible = (ankle_vis >= 0.5) & np.isfinite(ankle_y_pair)
+    visible_ankle_y = ankle_y_pair[visible]
+    finite_ankle_y = ankle_y_pair[np.isfinite(ankle_y_pair)]
+    if visible_ankle_y.size > 0:
+        ground_level = float(np.percentile(visible_ankle_y, 5.0))
+    elif finite_ankle_y.size > 0:
+        ground_level = float(np.percentile(finite_ankle_y, 5.0))
+    else:
+        ground_level = 0.0
+    y_m -= ground_level
+
+    world_y = landmarks_3d_world[:n_frames, :, 1].astype(np.float64)
+    finite_world_y = world_y[np.isfinite(world_y)]
+    finite_y_m = y_m[np.isfinite(y_m)]
+    if finite_world_y.size > 0 and finite_y_m.size > 0:
+        world_span = float(finite_world_y.max() - finite_world_y.min())
+        calib_span = float(finite_y_m.max() - finite_y_m.min())
+    else:
+        world_span = 0.0
+        calib_span = 0.0
+    if world_span > 1e-6 and calib_span > 1e-6:
+        depth_scale = calib_span / world_span
+    else:
+        depth_scale = float(np.nanmedian(per_frame_mpp) * image_height)
+    z_m = landmarks_3d_world[:n_frames, :, 2].astype(np.float64) * depth_scale
+
+    calibrated = np.zeros((n_frames, n_joints, 4), dtype=np.float32)
+    calibrated[:, :, 0] = x_m.astype(np.float32)
+    calibrated[:, :, 1] = y_m.astype(np.float32)
+    calibrated[:, :, 2] = z_m.astype(np.float32)
+    calibrated[:, :, 3] = landmarks_2d[:n_frames, :, 2]
+    return calibrated
 
 
 def _estimate_bar_height_from_anatomical_scale(
@@ -472,6 +500,42 @@ def _densify_homographies(
     return dense
 
 
+def _densify_affines(
+    affines: np.ndarray,
+    valid_mask: np.ndarray,
+) -> np.ndarray:
+    """Linearly fill invalid affine frames from nearest valid neighbours."""
+    if affines.ndim != 3 or affines.shape[1:] != (2, 3):
+        raise ValueError("affines must have shape (T, 2, 3)")
+    valid = np.asarray(valid_mask, dtype=bool)
+    if valid.shape != (affines.shape[0],):
+        raise ValueError("valid_mask must have shape (T,)")
+    if not np.any(valid):
+        return affines.copy()
+
+    frame_idx = np.arange(affines.shape[0], dtype=np.float64)
+    valid_idx = frame_idx[valid]
+    dense = np.empty_like(affines, dtype=np.float64)
+    for row in range(2):
+        for col in range(3):
+            dense[:, row, col] = np.interp(frame_idx, valid_idx, affines[valid, row, col])
+    return dense
+
+
+def _longest_false_run(mask: np.ndarray) -> int:
+    """Return the longest contiguous run of False values in a boolean mask."""
+    values = np.asarray(mask, dtype=bool)
+    longest = 0
+    current = 0
+    for value in values:
+        if value:
+            current = 0
+        else:
+            current += 1
+            longest = max(longest, current)
+    return longest
+
+
 def calibrate_landmarks_with_scene(
     landmarks_2d: np.ndarray,
     landmarks_3d_world: np.ndarray,
@@ -482,14 +546,17 @@ def calibrate_landmarks_with_scene(
     thigh_length_m: float | None = None,
     shank_length_m: float | None = None,
     scene_anchors: SceneAnchors | None = None,
+    camera_motion: CameraMotion | None = None,
     min_anchor_confidence: float = 0.5,
 ) -> tuple[np.ndarray, dict]:
-    """Calibrate landmarks, preferring scene homography when reliable.
+    """Calibrate landmarks, preferring egomotion or scene homography when reliable.
 
     The existing anatomical calibration remains the fallback for all frames.
-    Scene homography is accepted or rejected at clip level so X/Y never switch
-    coordinate systems frame-by-frame.  Z remains the BlazePose-depth-derived
-    anatomical fallback when the scene path is accepted.
+    Camera-motion and scene homography paths are accepted or rejected at clip
+    level so coordinates never switch frame-by-frame.  Egomotion is used only
+    for horizontal pixels because the Phase 9 blocker is scene-fixed horizontal
+    velocity; anatomical vertical pixels preserve the established Y-up height
+    convention.
 
     Returns:
         ``(calibrated_landmarks, calibration_info)``.
@@ -506,10 +573,19 @@ def calibrate_landmarks_with_scene(
     info: dict = {
         "method": "anatomical",
         "anchor_coverage_pct": 0.0,
+        "anchor_valid_counts_histogram": {"0": 0, "1": 0, "2": 0, "3": 0, "4": 0},
+        "anchor_four_point_valid_pct": 0.0,
+        "crossbar_confirmed_pct": 0.0,
         "scene_anatomical_scale_ratio": None,
         "scene_anchor_decision_reason": "coverage_below_threshold",
+        "egomotion_coverage_pct": 0.0,
+        "egomotion_median_confidence": None,
+        "egomotion_p10_confidence": None,
+        "egomotion_min_inliers": None,
+        "egomotion_frames_without_mask": 0,
+        "egomotion_decision_reason": "unavailable",
     }
-    if scene_anchors is None:
+    if scene_anchors is None and camera_motion is None:
         return fallback, info
 
     anatomical_mpp, scale_info = _anatomical_scale_mpp_for_info(
@@ -520,47 +596,100 @@ def calibrate_landmarks_with_scene(
         thigh_length_m,
         shank_length_m,
     )
-    bar_height_source = "filename" if scene_anchors.bar_height_m is not None else "none"
-    anchors_for_fit = scene_anchors
-    if scene_anchors.bar_height_m is None:
-        estimated_bar_height = _estimate_bar_height_from_anatomical_scale(
-            scene_anchors,
-            float(np.nanmedian(anatomical_mpp)),
+
+    egomotion_valid: np.ndarray | None = None
+    egomotion_decision_reason = "unavailable"
+    if camera_motion is not None:
+        n_motion = min(fallback.shape[0], camera_motion.cumulative_affines.shape[0])
+        egomotion_valid = camera_motion_valid_mask(
+            camera_motion,
+            min_confidence=0.0,
+        )[:n_motion]
+        egomotion_coverage = float(np.mean(egomotion_valid)) if n_motion else 0.0
+        if np.any(egomotion_valid):
+            valid_confidence = camera_motion.confidence[:n_motion][egomotion_valid]
+            egomotion_median_confidence = float(np.nanmedian(valid_confidence))
+            egomotion_p10_confidence = float(np.nanpercentile(valid_confidence, 10.0))
+        else:
+            egomotion_median_confidence = None
+            egomotion_p10_confidence = None
+
+        if egomotion_coverage < 0.60:
+            egomotion_decision_reason = "coverage_below_threshold"
+        elif egomotion_median_confidence is None or egomotion_median_confidence < 0.60:
+            egomotion_decision_reason = "confidence_below_threshold"
+        else:
+            egomotion_decision_reason = "accepted"
+
+        info.update(
+            {
+                "egomotion_coverage_pct": round(egomotion_coverage * 100.0, 2),
+                "egomotion_median_confidence": egomotion_median_confidence,
+                "egomotion_p10_confidence": egomotion_p10_confidence,
+                "egomotion_min_inliers": int(camera_motion.min_inlier_count),
+                "egomotion_frames_without_mask": int(camera_motion.frames_without_mask),
+                "egomotion_decision_reason": egomotion_decision_reason,
+            }
         )
-        if estimated_bar_height is not None:
-            anchors_for_fit = replace(scene_anchors, bar_height_m=estimated_bar_height)
-            bar_height_source = "anatomical_estimate"
 
-    homographies = fit_per_frame_homography(anchors_for_fit)
-    n_frames = min(fallback.shape[0], homographies.shape[0])
-    valid = homography_valid_mask(
-        homographies[:n_frames],
-        confidence=anchors_for_fit.confidence[:n_frames],
-        min_confidence=min_anchor_confidence,
-    )
-
-    scene_mpp = estimate_scene_scale_mpp(anchors_for_fit)[:n_frames]
+    homographies = np.empty((0, 3, 3), dtype=np.float64)
+    valid = np.zeros(fallback.shape[0], dtype=bool)
+    scene_mpp = np.full(fallback.shape[0], np.nan, dtype=np.float64)
     ratio = None
-    ratio_valid = valid & np.isfinite(scene_mpp) & np.isfinite(anatomical_mpp[:n_frames])
-    ratio_valid &= anatomical_mpp[:n_frames] > 0
-    if np.any(ratio_valid):
-        ratio = float(np.nanmedian(scene_mpp[ratio_valid] / anatomical_mpp[:n_frames][ratio_valid]))
+    bar_height_source = "none"
+    bar_height_m = None
+    scene_decision_reason = "coverage_below_threshold"
+    if scene_anchors is not None:
+        bar_height_source = "filename" if scene_anchors.bar_height_m is not None else "none"
+        anchors_for_fit = scene_anchors
+        if scene_anchors.bar_height_m is None:
+            estimated_bar_height = _estimate_bar_height_from_anatomical_scale(
+                scene_anchors,
+                float(np.nanmedian(anatomical_mpp)),
+            )
+            if estimated_bar_height is not None:
+                anchors_for_fit = replace(scene_anchors, bar_height_m=estimated_bar_height)
+                bar_height_source = "anatomical_estimate"
+        bar_height_m = anchors_for_fit.bar_height_m
 
-    coverage = float(np.mean(valid)) if n_frames else 0.0
-    if coverage < 0.60:
-        decision_reason = "coverage_below_threshold"
-    elif ratio is None or not (0.8 <= ratio <= 1.2):
-        decision_reason = "ratio_out_of_range"
+        homographies = fit_per_frame_homography(anchors_for_fit)
+        n_scene = min(fallback.shape[0], homographies.shape[0])
+        valid = homography_valid_mask(
+            homographies[:n_scene],
+            confidence=anchors_for_fit.confidence[:n_scene],
+            min_confidence=min_anchor_confidence,
+        )
+
+        scene_mpp = estimate_scene_scale_mpp(anchors_for_fit)[:n_scene]
+        ratio_valid = valid & np.isfinite(scene_mpp) & np.isfinite(anatomical_mpp[:n_scene])
+        ratio_valid &= anatomical_mpp[:n_scene] > 0
+        if np.any(ratio_valid):
+            ratio = float(
+                np.nanmedian(scene_mpp[ratio_valid] / anatomical_mpp[:n_scene][ratio_valid])
+            )
+
+        scene_coverage = float(np.mean(valid)) if n_scene else 0.0
+        longest_invalid_gap = _longest_false_run(valid)
+        if scene_coverage < 0.60:
+            scene_decision_reason = "coverage_below_threshold"
+        elif longest_invalid_gap > 4:
+            scene_decision_reason = "coverage_below_threshold"
+        elif ratio is None or not (0.8 <= ratio <= 1.2):
+            scene_decision_reason = "ratio_out_of_range"
+        else:
+            scene_decision_reason = "accepted"
     else:
-        decision_reason = "accepted"
+        scene_coverage = 0.0
+        longest_invalid_gap = 0
 
     info.update(
         {
-            "anchor_coverage_pct": round(coverage * 100.0, 2),
+            "anchor_coverage_pct": round(scene_coverage * 100.0, 2),
             "scene_anatomical_scale_ratio": ratio,
-            "scene_anchor_decision_reason": decision_reason,
+            "scene_anchor_decision_reason": scene_decision_reason,
+            "scene_anchor_longest_invalid_gap_frames": int(longest_invalid_gap),
             "bar_height_source": bar_height_source,
-            "bar_height_m": anchors_for_fit.bar_height_m,
+            "bar_height_m": bar_height_m,
             "anatomical_scale_mpp": float(np.nanmedian(anatomical_mpp)),
             "scene_scale_mpp": (
                 float(np.nanmedian(scene_mpp)) if np.isfinite(scene_mpp).any() else None
@@ -568,9 +697,53 @@ def calibrate_landmarks_with_scene(
             "scale_info": scale_info,
         }
     )
-    if decision_reason != "accepted":
+    if scene_anchors is not None:
+        info.update(scene_anchor_diagnostics(scene_anchors))
+
+    if (
+        camera_motion is not None
+        and egomotion_valid is not None
+        and egomotion_decision_reason == "accepted"
+    ):
+        n_motion = min(fallback.shape[0], camera_motion.cumulative_affines.shape[0])
+        dense_cumulative = _densify_affines(
+            camera_motion.cumulative_affines[:n_motion],
+            egomotion_valid[:n_motion],
+        )
+        dense_motion = replace(
+            camera_motion,
+            cumulative_affines=dense_cumulative,
+            pairwise_affines=camera_motion.pairwise_affines[:n_motion],
+            confidence=camera_motion.confidence[:n_motion],
+            inlier_counts=camera_motion.inlier_counts[:n_motion],
+            feature_counts=camera_motion.feature_counts[:n_motion],
+        )
+        landmarks_px = _landmarks_to_pixel_space(
+            landmarks_2d[:n_motion],
+            image_width,
+            image_height,
+        )
+        warped_px = warp_landmarks_remove_camera_motion(
+            landmarks_px,
+            dense_motion,
+            np.ones(n_motion, dtype=bool),
+        )
+        source_px = landmarks_px.copy()
+        source_px[:, :, 0] = warped_px[:, :, 0]
+        calibrated = _calibrate_pixel_landmarks_to_world(
+            landmarks_2d[:n_motion],
+            landmarks_3d_world[:n_motion],
+            source_px,
+            anatomical_mpp[:n_motion],
+            image_height=image_height,
+        )
+        info["method"] = "egomotion"
+        return calibrated, info
+
+    if scene_decision_reason != "accepted":
         return fallback, info
 
+    n_frames = min(fallback.shape[0], homographies.shape[0])
     landmarks_px = _landmarks_to_pixel_space(landmarks_2d[:n_frames], image_width, image_height)
     dense_homographies = _densify_homographies(homographies[:n_frames], valid)
     scene_xy = warp_landmarks_to_scene(

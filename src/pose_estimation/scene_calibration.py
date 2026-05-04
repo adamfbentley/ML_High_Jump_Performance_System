@@ -35,6 +35,7 @@ class SceneAnchors:
     confidence: np.ndarray
     upright_separation_m: float = 4.02
     bar_height_m: float | None = None
+    crossbar_confirmed: np.ndarray | None = None
 
 
 def _infer_frame_count(anchors: SceneAnchors) -> int:
@@ -100,6 +101,40 @@ def estimate_scene_scale_mpp(anchors: SceneAnchors) -> np.ndarray:
         if candidates:
             scale[t] = float(np.median(candidates))
     return scale
+
+
+def scene_anchor_diagnostics(anchors: SceneAnchors) -> dict:
+    """Summarise per-frame anchor completeness for reports and validation."""
+    n_frames = _infer_frame_count(anchors)
+    arrays = (
+        _anchor_array(anchors.upright_left_base_px, n_frames),
+        _anchor_array(anchors.upright_right_base_px, n_frames),
+        _anchor_array(anchors.upright_left_top_px, n_frames),
+        _anchor_array(anchors.upright_right_top_px, n_frames),
+    )
+    valid_counts = np.zeros(n_frames, dtype=np.int32)
+    for arr in arrays:
+        valid_counts += np.isfinite(arr).all(axis=1)
+
+    histogram = {
+        str(n): int(np.count_nonzero(valid_counts == n))
+        for n in range(5)
+    }
+    four_anchor_pct = float(np.mean(valid_counts >= 4) * 100.0) if n_frames else 0.0
+
+    crossbar = anchors.crossbar_confirmed
+    if crossbar is not None:
+        crossbar_arr = np.asarray(crossbar, dtype=bool)
+        n = min(n_frames, len(crossbar_arr))
+        crossbar_pct = float(np.mean(crossbar_arr[:n]) * 100.0) if n else 0.0
+    else:
+        crossbar_pct = 0.0
+
+    return {
+        "anchor_valid_counts_histogram": histogram,
+        "anchor_four_point_valid_pct": round(four_anchor_pct, 2),
+        "crossbar_confirmed_pct": round(crossbar_pct, 2),
+    }
 
 
 def fit_per_frame_homography(anchors: SceneAnchors) -> np.ndarray:
@@ -258,7 +293,7 @@ def _detect_anchors_in_frame(
     frame: np.ndarray,
     *,
     max_detection_width: int = 960,
-) -> tuple[dict[str, np.ndarray], float]:
+) -> tuple[dict[str, np.ndarray], float, bool]:
     """Detect upright/base/top anchors in one frame using edges and Hough lines."""
     import cv2
 
@@ -289,7 +324,7 @@ def _detect_anchors_in_frame(
         "right_top": np.array([np.nan, np.nan], dtype=np.float64),
     }
     if lines is None:
-        return empty, 0.0
+        return empty, 0.0, False
 
     verticals = []
     horizontals = []
@@ -328,7 +363,7 @@ def _detect_anchors_in_frame(
             )
 
     if len(verticals) < 2:
-        return empty, 0.0
+        return empty, 0.0, False
 
     best_pair = None
     best_score = -np.inf
@@ -349,7 +384,7 @@ def _detect_anchors_in_frame(
                 best_pair = (a, b)
 
     if best_pair is None:
-        return empty, 0.0
+        return empty, 0.0, False
 
     left, right = best_pair
     left_top = left["top"].copy()
@@ -384,7 +419,7 @@ def _detect_anchors_in_frame(
     if scale_back != 1.0:
         for point in anchors.values():
             point *= scale_back
-    return anchors, float(min(confidence, 1.0))
+    return anchors, float(min(confidence, 1.0)), crossbar is not None
 
 
 def _track_missing_anchors(
@@ -448,18 +483,20 @@ def detect_scene_anchors(
         "right_top": np.full((n_frames, 2), np.nan, dtype=np.float64),
     }
     confidence = np.zeros(n_frames, dtype=np.float64)
+    crossbar_confirmed = np.zeros(n_frames, dtype=bool)
 
     stride = max(1, int(detection_stride))
     for t, frame in enumerate(frame_list):
         if t % stride != 0:
             continue
-        detected, conf = _detect_anchors_in_frame(
+        detected, conf, has_crossbar = _detect_anchors_in_frame(
             frame,
             max_detection_width=max_detection_width,
         )
         for name, point in detected.items():
             anchors_by_name[name][t] = point
         confidence[t] = conf
+        crossbar_confirmed[t] = has_crossbar
 
     _track_missing_anchors(frame_list, anchors_by_name, confidence)
 
@@ -471,4 +508,5 @@ def detect_scene_anchors(
         confidence=confidence,
         upright_separation_m=upright_separation_m,
         bar_height_m=bar_height_m,
+        crossbar_confirmed=crossbar_confirmed,
     )

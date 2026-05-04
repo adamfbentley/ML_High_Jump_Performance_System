@@ -36,6 +36,7 @@ class Chunk:
     start_line: int
     end_line: int
     chunk_index: int
+    source_mtime_ns: int = 0
 
 
 class HashingEmbeddingFunction:
@@ -146,6 +147,7 @@ def chunk_text(
     rel_path: str,
     chunk_chars: int,
     overlap_chars: int,
+    source_mtime_ns: int = 0,
 ) -> list[Chunk]:
     """Chunk text on line boundaries with rough character limits."""
     if chunk_chars <= 0:
@@ -178,6 +180,7 @@ def chunk_text(
                 start_line=start_line,
                 end_line=end_line,
                 chunk_index=chunk_index,
+                source_mtime_ns=source_mtime_ns,
             )
         )
 
@@ -218,7 +221,15 @@ def chunks_from_files(root: Path, config: dict[str, Any]) -> list[Chunk]:
         if text is None:
             continue
         rel_path = normalise_rel_path(path, root)
-        chunks.extend(chunk_text(text, rel_path, chunk_chars, overlap_chars))
+        chunks.extend(
+            chunk_text(
+                text,
+                rel_path,
+                chunk_chars,
+                overlap_chars,
+                source_mtime_ns=path.stat().st_mtime_ns,
+            )
+        )
 
     return chunks
 
@@ -230,6 +241,7 @@ def chunk_metadata(chunk: Chunk) -> dict[str, str | int]:
         "start_line": chunk.start_line,
         "end_line": chunk.end_line,
         "chunk_index": chunk.chunk_index,
+        "source_mtime_ns": chunk.source_mtime_ns,
     }
 
 

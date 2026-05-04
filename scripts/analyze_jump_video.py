@@ -16,6 +16,7 @@ import argparse
 import json
 import logging
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -38,10 +39,12 @@ from src.pose_estimation.skeleton.landmark_postprocessor import (
     PostProcessorConfig,
     postprocess_landmarks,
 )
+from src.pose_estimation.egomotion import estimate_camera_motion
 from src.pose_estimation.opensim_ik import is_opensim_available, run_opensim_ik
 from src.pose_estimation.scale_calibration import (
     calibrate_landmarks_to_world,
     calibrate_landmarks_with_scene,
+    compute_per_frame_scale_mpp,
 )
 from src.pose_estimation.scene_calibration import detect_scene_anchors
 
@@ -49,6 +52,24 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+
+
+@dataclass(frozen=True)
+class QualityGateConfig:
+    """Clip-level gates for calibration validation and training admission."""
+
+    min_pose_validity_pct: float = 60.0
+    min_kinematics_pose_validity_pct: float = 40.0
+    max_segment_spread_ratio: float = 1.35
+    max_kinematics_segment_spread_ratio: float = 1.60
+    min_takeoff_horizontal_mps: float = 2.5
+    max_takeoff_horizontal_mps: float = 5.5
+    min_takeoff_angle_deg: float = 38.0
+    max_takeoff_angle_deg: float = 55.0
+    max_peak_com_m: float = 3.0
+
+
+DEFAULT_QUALITY_GATES = QualityGateConfig()
 
 
 def parse_bar_height(filename: str) -> float | None:
@@ -82,6 +103,18 @@ def collect_videos(input_path: Path) -> list[Path]:
         )
         return videos
     return []
+
+
+def infer_default_report_dir(samples_dir: Path | None) -> Path:
+    """Infer a run-specific report directory from samples_<tag> output paths."""
+    default_dir = Path("data") / "results"
+    if samples_dir is None:
+        return default_dir
+    if samples_dir.parent == default_dir and samples_dir.name.startswith("samples_"):
+        tag = samples_dir.name.removeprefix("samples_")
+        if tag:
+            return default_dir / tag
+    return default_dir
 
 
 # ── Pose Extraction ───────────────────────────────────────────────────
@@ -135,6 +168,97 @@ def extract_poses(video_path: Path) -> tuple[np.ndarray, np.ndarray, float, int,
         landmarks_3d[:, :, 3] = landmarks_2d[:, :, 2]
 
     return landmarks_2d, landmarks_3d, sequence.fps, vid_width, vid_height
+
+
+def pose_validity_pct(landmarks_2d: np.ndarray, min_visibility: float = 0.5) -> float:
+    """Estimate pose-valid frame percentage from landmark visibility."""
+    if landmarks_2d.size == 0:
+        return 0.0
+    visible_counts = np.count_nonzero(landmarks_2d[:, :, 2] >= min_visibility, axis=1)
+    return float(np.mean(visible_counts >= 4) * 100.0)
+
+
+def segment_spread_ratio(calibration_info: dict | None) -> float | None:
+    """Return max/min anatomical segment scale spread from calibration diagnostics."""
+    if not calibration_info:
+        return None
+    per_segment = calibration_info.get("scale_info", {}).get("per_segment", {})
+    scales = [
+        float(values["scale_mpp"])
+        for values in per_segment.values()
+        if values.get("scale_mpp") and np.isfinite(values.get("scale_mpp"))
+    ]
+    if len(scales) < 2:
+        return None
+    min_scale = min(scales)
+    if min_scale <= 0:
+        return None
+    return float(max(scales) / min_scale)
+
+
+def _calibration_source(calibration_info: dict | None) -> str:
+    method = (calibration_info or {}).get("method")
+    if method in {"egomotion", "scene_homography"}:
+        return method
+    return "none"
+
+
+def _quality_block(
+    *,
+    pose_pct: float,
+    contact_interval_detected: bool,
+    calibration_info: dict | None,
+    peak_com_height_m: float,
+    takeoff_horizontal_mps: float | None,
+    takeoff_angle_deg: float | None,
+    gates: QualityGateConfig = DEFAULT_QUALITY_GATES,
+) -> dict:
+    spread = segment_spread_ratio(calibration_info)
+    source = _calibration_source(calibration_info)
+    anatomical_scale_converged = spread is None or spread <= gates.max_segment_spread_ratio
+    kinematics_scale_ok = spread is None or spread <= gates.max_kinematics_segment_spread_ratio
+
+    training_failures: list[str] = []
+    if pose_pct < gates.min_pose_validity_pct:
+        training_failures.append("pose_validity_below_threshold")
+    if not contact_interval_detected:
+        training_failures.append("no_contact_interval")
+    if not anatomical_scale_converged:
+        training_failures.append("anatomical_segment_spread_high")
+    if source == "none":
+        training_failures.append("no_scene_fixed_horizontal_source")
+    if takeoff_horizontal_mps is None or not (
+        gates.min_takeoff_horizontal_mps
+        <= takeoff_horizontal_mps
+        <= gates.max_takeoff_horizontal_mps
+    ):
+        training_failures.append("takeoff_horizontal_out_of_range")
+    if takeoff_angle_deg is None or not (
+        gates.min_takeoff_angle_deg <= takeoff_angle_deg <= gates.max_takeoff_angle_deg
+    ):
+        training_failures.append("takeoff_angle_out_of_range")
+    if peak_com_height_m > gates.max_peak_com_m:
+        training_failures.append("peak_com_above_guardrail")
+
+    kinematics_failures: list[str] = []
+    if pose_pct < gates.min_kinematics_pose_validity_pct:
+        kinematics_failures.append("pose_validity_below_kinematics_threshold")
+    if not contact_interval_detected:
+        kinematics_failures.append("no_contact_interval")
+    if not kinematics_scale_ok:
+        kinematics_failures.append("anatomical_segment_spread_high")
+
+    return {
+        "pose_validity_pct": round(float(pose_pct), 2),
+        "contact_interval_detected": bool(contact_interval_detected),
+        "anatomical_scale_converged": bool(anatomical_scale_converged),
+        "segment_spread_ratio": round(spread, 3) if spread is not None else None,
+        "scene_fixed_horizontal_source": source,
+        "training_grade": not training_failures,
+        "kinematics_grade": not kinematics_failures,
+        "training_grade_failures": training_failures,
+        "kinematics_grade_failures": kinematics_failures,
+    }
 
 
 # ── Kinematics ─────────────────────────────────────────────────────────
@@ -303,17 +427,17 @@ def run_pinn_inference(
 # ── Summary Report ─────────────────────────────────────────────────────
 
 
-def select_takeoff_frame_from_ground_contact(
+def select_takeoff_frame_details(
     sample: BiomechanicalSample,
     fallback_frame: int,
-) -> int:
-    """Select toe-off as the final frame of the last detected ground contact.
+) -> tuple[int, bool, int]:
+    """Select toe-off and report whether a contact interval was detected.
 
     `detect_ground_contacts` works in centimetres; video-pipeline pose landmarks
     are calibrated in metres, so ankle trajectories are converted before use.
     """
     if sample.pose_3d is None or sample.pose_3d.ndim != 3 or sample.pose_3d.shape[1] <= 28:
-        return fallback_frame
+        return fallback_frame, False, 0
 
     contacts: list[tuple[int, int]] = []
     for ankle_idx in (27, 28):
@@ -323,7 +447,7 @@ def select_takeoff_frame_from_ground_contact(
         contacts.extend(detect_ground_contacts(ankle_m * 100.0, sample.fps))
 
     if not contacts:
-        return fallback_frame
+        return fallback_frame, False, 0
 
     if sample.com_position is not None and len(sample.com_position) > 0:
         peak_com_frame = int(np.argmax(sample.com_position[:, 1]))
@@ -332,7 +456,16 @@ def select_takeoff_frame_from_ground_contact(
             contacts = pre_peak_contacts
 
     contacts.sort(key=lambda contact: (contact[1], contact[0]))
-    return int(contacts[-1][1])
+    return int(contacts[-1][1]), True, len(contacts)
+
+
+def select_takeoff_frame_from_ground_contact(
+    sample: BiomechanicalSample,
+    fallback_frame: int,
+) -> int:
+    """Backward-compatible takeoff-frame selector."""
+    frame, _detected, _count = select_takeoff_frame_details(sample, fallback_frame)
+    return frame
 
 
 def generate_report(
@@ -340,6 +473,8 @@ def generate_report(
     pinn_grf: np.ndarray | None,
     bar_height_m: float | None = None,
     calibration_info: dict | None = None,
+    pose_validity_pct_value: float | None = None,
+    quality_gates: QualityGateConfig = DEFAULT_QUALITY_GATES,
 ) -> dict:
     """Generate a summary report of the jump analysis."""
     mass = sample.subject.body_mass_kg
@@ -369,7 +504,7 @@ def generate_report(
     vy = com_vel[:, 1]
     if len(vy) >= 2:
         fallback_takeoff_frame = int(np.argmax(vy))
-        takeoff_frame = select_takeoff_frame_from_ground_contact(
+        takeoff_frame, contact_interval_detected, contact_interval_count = select_takeoff_frame_details(
             sample, fallback_frame=fallback_takeoff_frame,
         )
         takeoff_vel = com_vel[takeoff_frame]
@@ -378,9 +513,21 @@ def generate_report(
         takeoff_angle = float(np.degrees(np.arctan2(takeoff_vert, takeoff_horiz)))
     else:
         takeoff_frame = 0
+        contact_interval_detected = False
+        contact_interval_count = 0
         takeoff_angle = None
         takeoff_horiz = None
         takeoff_vert = None
+
+    quality = _quality_block(
+        pose_pct=pose_validity_pct_value if pose_validity_pct_value is not None else 0.0,
+        contact_interval_detected=contact_interval_detected,
+        calibration_info=calibration_info,
+        peak_com_height_m=peak_com_height,
+        takeoff_horizontal_mps=takeoff_horiz,
+        takeoff_angle_deg=takeoff_angle,
+        gates=quality_gates,
+    )
 
     # PINN-refined metrics
     pinn_metrics = {}
@@ -417,9 +564,16 @@ def generate_report(
         "calibration": calibration_info or {
             "method": "anatomical",
             "anchor_coverage_pct": 0.0,
+            "anchor_valid_counts_histogram": {"0": 0, "1": 0, "2": 0, "3": 0, "4": 0},
+            "anchor_four_point_valid_pct": 0.0,
+            "crossbar_confirmed_pct": 0.0,
             "scene_anatomical_scale_ratio": None,
+            "egomotion_coverage_pct": 0.0,
+            "egomotion_median_confidence": None,
         },
+        "quality": quality,
         "takeoff_frame": int(takeoff_frame),
+        "takeoff_contact_intervals_detected": int(contact_interval_count),
         **pinn_metrics,
     }
 
@@ -452,6 +606,9 @@ def analyze_video(
     model_path: Path | None = None,
     samples_out_dir: Path | None = None,
     use_scene_anchor: bool = False,
+    use_egomotion: bool = False,
+    scene_detection_stride: int = 15,
+    scene_max_detection_width: int = 640,
 ) -> dict:
     """Run the full analysis pipeline on a single video.
 
@@ -467,14 +624,53 @@ def analyze_video(
 
     # 1. Pose estimation (2D normalised + 3D world)
     landmarks_2d, landmarks_3d_world, fps, vid_w, vid_h = extract_poses(video_path)
+    pose_pct = pose_validity_pct(landmarks_2d)
     bar_height = parse_bar_height(video_path.name)
 
     # 1a. Scale calibration: prefer multi-segment per-frame (Phase 9a) when
     #     anthropometric segment lengths are supplied; fall back to legacy
     #     single-frame nose-ankle otherwise.
     calibration_info: dict
-    if use_scene_anchor:
-        scene_anchors = detect_scene_anchors(video_path, bar_height_m=bar_height)
+    if use_scene_anchor or use_egomotion:
+        scene_anchors = (
+            detect_scene_anchors(
+                video_path,
+                bar_height_m=bar_height,
+                detection_stride=scene_detection_stride,
+                max_detection_width=scene_max_detection_width,
+            )
+            if use_scene_anchor
+            else None
+        )
+        camera_motion = (
+            estimate_camera_motion(
+                video_path,
+                landmarks_2d,
+                image_width=vid_w,
+                image_height=vid_h,
+            )
+            if use_egomotion
+            else None
+        )
+        if camera_motion is not None:
+            inliers = camera_motion.inlier_counts
+            features = camera_motion.feature_counts
+            confidence = camera_motion.confidence
+            low_inlier_pct = (
+                float(np.mean(inliers < camera_motion.min_inlier_count) * 100.0)
+                if len(inliers)
+                else 0.0
+            )
+            logger.info(
+                "  Egomotion: feature median=%s, inlier median=%s, "
+                "confidence median=%s, low-inlier frames=%.1f%%, "
+                "frames without mask=%s",
+                float(np.nanmedian(features)) if len(features) else None,
+                float(np.nanmedian(inliers)) if len(inliers) else None,
+                float(np.nanmedian(confidence)) if len(confidence) else None,
+                low_inlier_pct,
+                camera_motion.frames_without_mask,
+            )
         landmarks_3d, calibration_info = calibrate_landmarks_with_scene(
             landmarks_2d,
             landmarks_3d_world,
@@ -484,13 +680,20 @@ def analyze_video(
             thigh_length_m=thigh_length_m,
             shank_length_m=shank_length_m,
             scene_anchors=scene_anchors,
+            camera_motion=camera_motion,
         )
         logger.info(
-            "  Scene calibration: method=%s, anchor coverage=%.1f%%, "
-            "scene/anatomical scale=%s",
+            "  Calibration: method=%s, egomotion coverage=%.1f%%, "
+            "egomotion median confidence=%s, scene anchor coverage=%.1f%%, "
+            "scene/anatomical scale=%s, anchor 4-point frames=%.1f%%, "
+            "crossbar confirmed=%.1f%%",
             calibration_info.get("method"),
+            calibration_info.get("egomotion_coverage_pct", 0.0),
+            calibration_info.get("egomotion_median_confidence"),
             calibration_info.get("anchor_coverage_pct", 0.0),
             calibration_info.get("scene_anatomical_scale_ratio"),
+            calibration_info.get("anchor_four_point_valid_pct", 0.0),
+            calibration_info.get("crossbar_confirmed_pct", 0.0),
         )
     else:
         landmarks_3d = calibrate_landmarks_to_world(
@@ -499,10 +702,28 @@ def analyze_video(
             thigh_length_m=thigh_length_m,
             shank_length_m=shank_length_m,
         )
+        _mpp, scale_info = compute_per_frame_scale_mpp(
+            landmarks_2d,
+            image_width=vid_w,
+            image_height=vid_h,
+            thigh_length_m=thigh_length_m,
+            shank_length_m=shank_length_m,
+        )
         calibration_info = {
             "method": "anatomical",
             "anchor_coverage_pct": 0.0,
+            "anchor_valid_counts_histogram": {"0": 0, "1": 0, "2": 0, "3": 0, "4": 0},
+            "anchor_four_point_valid_pct": 0.0,
+            "crossbar_confirmed_pct": 0.0,
             "scene_anatomical_scale_ratio": None,
+            "scene_anchor_decision_reason": "unavailable",
+            "egomotion_coverage_pct": 0.0,
+            "egomotion_median_confidence": None,
+            "egomotion_p10_confidence": None,
+            "egomotion_min_inliers": None,
+            "egomotion_frames_without_mask": 0,
+            "egomotion_decision_reason": "unavailable",
+            "scale_info": scale_info,
         }
     logger.info(
         f"  Scale calibration applied: athlete height = {height_m:.2f}m, "
@@ -568,6 +789,7 @@ def analyze_video(
         pinn_grf,
         bar_height_m=bar_height,
         calibration_info=calibration_info,
+        pose_validity_pct_value=pose_pct,
     )
 
     # 6. Add session metadata
@@ -631,6 +853,18 @@ def main():
         help="Opt-in Phase 9c crossbar/upright scene calibration. Default off "
              "keeps the approved Phase 9a anatomical scale path.",
     )
+    parser.add_argument(
+        "--egomotion", choices=("on", "off"), default="off",
+        help="Opt-in camera egomotion compensation for panned phone footage.",
+    )
+    parser.add_argument(
+        "--scene-detection-stride", type=int, default=15,
+        help="Run scene-anchor Hough detection every N frames before optical-flow fill.",
+    )
+    parser.add_argument(
+        "--scene-max-detection-width", type=int, default=640,
+        help="Resize width for scene-anchor detection. Lower is faster; higher is sharper.",
+    )
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -657,6 +891,9 @@ def main():
                 model_path=model_path,
                 samples_out_dir=samples_dir,
                 use_scene_anchor=args.scene_anchor == "on",
+                use_egomotion=args.egomotion == "on",
+                scene_detection_stride=args.scene_detection_stride,
+                scene_max_detection_width=args.scene_max_detection_width,
             )
             all_reports.append(report)
 
@@ -688,7 +925,7 @@ def main():
         if args.output:
             out_path = Path(args.output)
         else:
-            out_dir = Path("data") / "results"
+            out_dir = infer_default_report_dir(samples_dir)
             out_dir.mkdir(parents=True, exist_ok=True)
             if len(all_reports) == 1:
                 out_path = out_dir / f"{all_reports[0]['video']}_report.json"
@@ -701,7 +938,7 @@ def main():
 
         # Also save per-session reports
         if len(all_reports) > 1:
-            out_dir = Path("data") / "results"
+            out_dir = infer_default_report_dir(samples_dir)
             sessions: dict[str, list] = {}
             for r in all_reports:
                 folder = r.get("session_folder", "unknown")
