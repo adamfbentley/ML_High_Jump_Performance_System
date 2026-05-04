@@ -10,6 +10,7 @@ embedding:
 
 include_globs:
   - CLAUDE.md
+  - AGENTS.md
   - ROADMAP.md
   - ARCHITECTURE.md
   - HANDOFF.md
@@ -22,6 +23,7 @@ include_globs:
   - src/**/*.py
   - scripts/**/*.py
   - tests/**/*.py
+  - tools/memory/config.yaml
   - experiments/configs/**/*.yaml
   - experiments/configs/**/*.yml
 

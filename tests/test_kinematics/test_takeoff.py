@@ -297,5 +297,29 @@ def test_generate_report_falls_back_to_argmax_vy_without_ground_contacts():
     assert report["velocity"]["takeoff_vertical_mps"] == 20.0
 
 
+def test_generate_report_uses_scene_corrected_horizontal_velocity_for_angle():
+    """Once scene calibration corrects X velocity, the report angle follows vh_scene."""
+    sample = _make_video_sample_for_takeoff_frame_test(
+        contact_slice=slice(8, 12),
+        true_takeoff_frame=11,
+        velocity_spike_frame=20,
+    )
+    sample.com_velocity[:, 0] = 4.5
+    sample.com_velocity[:, 1] = 0.5
+    sample.com_velocity[11, 1] = 3.5
+    sample.com_velocity[20, 1] = 20.0
+
+    report = generate_report(
+        sample,
+        pinn_grf=None,
+        calibration_info={"method": "scene_homography", "anchor_coverage_pct": 100.0},
+    )
+    image_relative_angle = float(np.degrees(np.arctan2(3.5, 0.5)))
+
+    assert report["velocity"]["takeoff_angle_deg"] == pytest.approx(37.9, abs=0.1)
+    assert image_relative_angle > 80.0
+    assert report["calibration"]["method"] == "scene_homography"
+
+
 def test_parse_bar_height_accepts_numeric_video_extension():
     assert parse_bar_height("session_attempt_1.88.mp4") == 1.88

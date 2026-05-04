@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from tools.memory.rag_core import HashingEmbeddingFunction, chunk_text, is_excluded
+from tools.memory.rag_core import HashingEmbeddingFunction, chunk_metadata, chunk_text, is_excluded
 
 
 def test_hashing_embedding_is_deterministic_and_normalized():
@@ -18,12 +18,13 @@ def test_hashing_embedding_is_deterministic_and_normalized():
 def test_chunk_text_tracks_source_lines():
     text = "\n".join(f"line {i}" for i in range(1, 21))
 
-    chunks = chunk_text(text, "notes.md", chunk_chars=35, overlap_chars=10)
+    chunks = chunk_text(text, "notes.md", chunk_chars=35, overlap_chars=10, source_mtime_ns=123)
 
     assert len(chunks) > 1
     assert chunks[0].rel_path == "notes.md"
     assert chunks[0].start_line == 1
     assert chunks[0].end_line >= chunks[0].start_line
+    assert chunk_metadata(chunks[0])["source_mtime_ns"] == 123
 
 
 def test_private_data_exclusion_globs():
