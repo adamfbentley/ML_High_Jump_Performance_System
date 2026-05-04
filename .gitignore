@@ -96,3 +96,7 @@ memory/logs/*.log
 imogens_response- to-questions/
 questions to imogen.md
 EMAIL_FOR_IMOGEN.md
+
+# ---- Private business/strategy notes ----
+business/
+potential valuation.md

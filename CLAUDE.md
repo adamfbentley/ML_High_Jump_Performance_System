@@ -1,6 +1,7 @@
 # CLAUDE.md
 
 Bootstrap context for Claude Code sessions. Auto-loaded each conversation — keep tight.
+For agent-routing and expensive-review rules, read `AGENTS.md`.
 
 ## What this is
 
@@ -16,7 +17,8 @@ Research project, not a product. **Scientific correctness beats code elegance.**
 4. `src/data_pipeline/sample.py` — `BiomechanicalSample` is the canonical cross-module data format; never break its field names
 5. `src/utils/constants.py` — gravity, segment mass fractions
 
-For long-form first-time onboarding: `CLAUDE_ONBOARDING.md` (~340 lines).
+For deeper onboarding, prefer local RAG plus the files above instead of a long
+static onboarding prompt.
 
 ## Hard rules
 
@@ -31,7 +33,7 @@ For long-form first-time onboarding: `CLAUDE_ONBOARDING.md` (~340 lines).
 ## Quick commands
 
 ```bash
-# Run the full non-PINN test suite (currently 190 passing)
+# Run the full non-PINN test suite (currently 214 passing)
 .venv/Scripts/python.exe -m pytest tests/ --ignore=tests/test_pinn -q
 
 # Build/query local agent memory
@@ -48,39 +50,57 @@ For long-form first-time onboarding: `CLAUDE_ONBOARDING.md` (~340 lines).
 .venv/Scripts/python.exe scripts/analyze_jump_video.py "data/High Jump Videos/14_02_26/14_02_26_one_1.79.mp4"
 ```
 
-## Current phase (April 2026)
+## Current phase (May 2026)
 
-**Phase 9a + 9b SHIPPED, but Phase 10 is blocked.**
+**Phases 9a/9b/9c SHIPPED. Egomotion validated. Phase 10 still gated on Phase 9d (apparatus-anchored mpp).**
 
 - 9a: `src/pose_estimation/scale_calibration.py` derives a single video-wide
-  metres-per-pixel from the 95th percentile of visible thigh/shank projections,
-  median-aggregated across segments. Ground reference uses the 5th percentile
-  of visible ankle Y instead of unsafe `min()`.
-- 9b: `scripts/analyze_jump_video.py` selects takeoff as the final frame of the
-  last detected ankle-ground contact before flight, falling back to `argmax(vy)`
-  only when contact detection fails.
-- Bar-height metadata parser fixed for numeric extensions such as `.mp4`.
-- Full re-process completed: 45/45 reports, 45/45 `.npz` samples cached.
+  metres-per-pixel from the 95th percentile of visible thigh/shank projections.
+- 9b: `scripts/analyze_jump_video.py` anchors takeoff to the last ankle-ground
+  contact before peak CoM, with `argmax(vy)` fallback.
+- 9c: `src/pose_estimation/scene_calibration.py` (Hough-line apparatus
+  detector) and `src/pose_estimation/egomotion.py` (background-flow camera
+  motion) shipped with clip-level acceptance gates in
+  `calibrate_landmarks_with_scene`. Both opt-in via `--scene-anchor on` /
+  `--egomotion on`.
+- Validation infrastructure shipped: `scripts/probe_scene_anchors.py`,
+  `scripts/label_scene_anchors.py`, `scripts/evaluate_calibration_truth.py`,
+  `scripts/aggregate_calibration_modes.py`. 72 private videos available
+  (45 originals + 27 unknown-date with bar heights in filenames).
 
-Residual aggregate validation:
-- Peak CoM: median 1.67 m; 9/45 in the handoff's 2.0-2.7 m target range.
-- Takeoff vy: median 3.16 m/s; 18/45 in 3.0-4.5 m/s.
-- Takeoff angle: median 66.6 deg; 3/45 in 38-48 deg.
-- Bar-tagged subset: 17/45 filenames exposed bar height; median CoM-minus-bar
-  was -0.05 m and 8/17 were within -0.30 to +0.10 m.
+What hand-label evaluation showed (5 clips, takeoff-window comparison):
 
-Do **not** fine-tune yet. The blocker is no longer only vertical scale: takeoff
-horizontal velocity is unreliable from panned single-camera footage (median
-takeoff horizontal speed 1.08 m/s, only 2/45 in 2.5-5.5 m/s), so reported
-takeoff angles are still not trustworthy.
+- Auto-detector (Hough scene_homography): rejected on every clip; the detector
+  locks onto wrong vertical edges (net poles, mat frame). Dead end on existing
+  footage.
+- Egomotion: clearly beats anatomical on takeoff vh (e.g. on the densest-label
+  clip, egomotion 6.33 m/s vs anatomical 3.76 m/s vs truth 7.84 m/s).
+- A residual ~1 m/s underestimate persists *even on the tripod control* where
+  there is no panning to remove. This is not a panning failure; it is a depth
+  / mpp calibration bias. Anatomical mpp (p95 of thigh projection) is
+  systematically biased small at takeoff-zone depth.
+- Smoke claim of "median takeoff vh = 1.08 m/s" was misleading: it used
+  per-frame median (noise-dominated) on anatomical-only output. Truth values
+  at takeoff fall in or near the 2.5-5.5 m/s elite band on most clips.
+
+Do **not** fine-tune yet. The remaining blocker is the apparatus-anchored mpp
+work in Phase 9d (see `memory/plans/opus_plan_current.md`): use the labelled
+upright separation (4.02 m, IAAF spec) as a third independent scale source at
+the takeoff zone, validate against the tripod clip, then revisit Phase 10.
 
 ## Agent memory
 
-Use `memory/` for file-mediated Claude/Codex collaboration. `tools/memory/`
-builds and queries a local ChromaDB index using deterministic local hashing
-embeddings. The generated `memory/vector_index/` and JSONL logs are ignored.
-Do not index private athlete reports, videos, raw session metadata, or private
-emails.
+Use `memory/` for file-mediated Claude/Codex collaboration. The local RAG
+tooling under `tools/memory/` is **parked** — for a corpus this small,
+direct `Read` and `Grep` are faster and more accurate than the lexical
+hashing index. Revisit only if the corpus grows past ~200 docs or sentence-
+transformer embeddings are added. Do not index private athlete reports,
+videos, raw session metadata, or private emails.
+
+Expensive-review rule: use Opus-style review only for architecture, physics,
+data-contract, phase-gate, personal fine-tuning readiness, or repeated-failure
+questions. Send a compact packet with the goal, blocker, inspected files,
+commands run, observed metrics, constraints, and exact decision needed.
 
 ## Athlete-domain priorities (from Imogen's brief)
 
