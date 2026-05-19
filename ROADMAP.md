@@ -350,7 +350,7 @@ After the 9a/9b fixes, **0/45** reports have negative takeoff angles or velociti
 
 ---
 
-## Current State (29 April 2026)
+## Current State (5 May 2026)
 
 | Area | Status |
 |---|---|
@@ -363,16 +363,19 @@ After the 9a/9b fixes, **0/45** reports have negative takeoff angles or velociti
 | Differentiable optimiser + sensitivity analysis | ✅ Complete and tested |
 | Video analysis end-to-end pipeline | ✅ Complete (takeoff-detection bug fixed Phase 9) |
 | Athlete priority metrics (Athlete A alignment) | ✅ Implemented |
-| Test suite | ✅ 214 tests passing (`tests/test_pinn` ignored) |
+| Test suite | ✅ 222 tests passing (`tests/test_pinn` ignored) |
 | Public datasets downloaded (Zenodo CMJ, CoD, DVJ) | ✅ Done |
 | PINN pre-training run (3000 epochs) | ✅ Done — `final_model.pth` saved |
 | Athlete A's 45 jump videos processed | ✅ Re-processed Phase 9a/9b with 45 cached samples |
 | Takeoff detection (frame selection) | ✅ Fixed — contact-anchored takeoff with velocity fallback |
 | Takeoff detection (noise robustness) | ✅ Phase 9b implemented and tested |
-| Single-camera scale calibration | ⚠ Phase 9c shipped (egomotion, scene_homography opt-in). Egomotion narrows but does not close the takeoff-vh gap. Phase 9d (apparatus-anchored mpp) is next. |
-| Hand-label evaluation infrastructure | ✅ Phase 9c — label tool, truth evaluator with takeoff-window comparison, 5 bar-tagged clips labelled |
+| Single-camera scale calibration on panned footage | ❌ Closed — Phases 9c, 9d, 9e all attempted on existing footage. Egomotion narrows but does not close the gap; auto-detector dead; gravity-mpp fails because vertical camera tilt during flight corrupts the parabola fit. Conclusion: panned footage cannot be rescued to training-grade. |
+| Hand-label evaluation infrastructure | ✅ Phase 9c — label tool with partial-label UX, truth evaluator with takeoff-window comparison and gravity-mpp comparison mode, 5 bar-tagged clips labelled |
+| Gravity-mpp validation module | ✅ Phase 9e — `src/pose_estimation/gravity_calibration.py` implemented as validation-only; physics-correct on synthetic data; failed on Athlete A's panned footage as predicted |
+| Stationary-footage capture policy | 🟦 Locked 2026-05-05 — required for any training-grade physics, Phase 10 fine-tuning, and optimiser claims |
 | AddBiomechanics dataset downloaded | ⬜ Pending (highest-quality GRF pre-training data) |
-| Personal data fine-tuning loop | ⬜ Pending (no fine-tuned model yet) |
+| Personal data fine-tuning loop | ⬜ Pending — now gated on stationary footage collection, not further calibration work |
+| Athlete A stationary capture session | ⬜ Pending — minimum viable: tripod/fixed phone, no pan/zoom, 60 fps, landscape, full body visible through landing, bar/uprights in frame, bar height in filename |
 
 ---
 
@@ -424,24 +427,96 @@ findings (no per-clip private values).
 
 ---
 
+## Phase 9d/9e — Closing the Calibration Question on Panned Footage (May 2026)
+
+**Status:** closed. Existing panned footage cannot be rescued to training-grade.
+
+After hand-label evaluation isolated a residual mpp underestimate (not a
+panning failure), two independent recalibration paths were attempted:
+
+### Phase 9d attempt — Apparatus-anchored mpp at the takeoff zone
+
+The proposed fix used the labelled upright separation (4.02 m, IAAF spec) as a
+third independent scale source measured at the takeoff frame. This was the
+recommendation from Opus on 2026-05-04. The plan is preserved in
+`memory/plans/opus_plan_current.md` as the appendix on apparatus-anchored
+mpp.
+
+This was overtaken before full implementation by the gravity-mpp idea below,
+which is universal across sports and does not depend on apparatus being
+visible. The apparatus-anchored mpp would have been high-jump specific and
+required per-clip apparatus detection or hand labels.
+
+### Phase 9e attempt — Gravity-anchored mpp
+
+**Shipped:** `src/pose_estimation/gravity_calibration.py` and
+`tests/test_pose_estimation/test_gravity_calibration.py`.
+
+**Approach:** during true flight the CoM is a projectile, so the magnitude of
+its image-space acceleration equals `g / mpp`. Fit a 2D parabola to the CoM
+pixel trajectory over the flight window (default 10-27 frames after takeoff)
+and recover `mpp = 9.81 / pixel_acceleration_magnitude`. Built-in physics
+sanity gates: ≥65 % of acceleration must point downward,
+≤45 % can be horizontal, parabola fit R² ≥ 0.75. Module is plumbed into
+`evaluate_calibration_truth.py` as a validation mode alongside anatomical /
+egomotion / scene_homography; it is intentionally not wired into the
+production calibration path.
+
+**Result:** correct on synthetic projectile data. Failed on Athlete A's panned
+footage because phone operators tilt vertically to follow the athlete over
+the bar, and the residual tilt left after egomotion stabilisation is on the
+same order of magnitude as the real gravity signal. The parabola fit absorbs
+the tilt as spurious gravity, giving an mpp that is wrong by the same factor
+egomotion attempted to remove. Path A in the brainstorm (`memory/docs/decisions_log.md`
+2026-05-05 entry summarises) holds on truly stationary footage but is not a
+rescue path for handheld panning.
+
+### Conclusion — locked policy: stationary footage required
+
+The calibration problem on existing handheld phone footage is closed. No
+further attempts on panned phone clips will produce training-grade physics
+for the Phase 10 fine-tune. Going forward:
+
+- Stationary capture is the default requirement for training-grade physics,
+  Phase 10 fine-tuning, and optimiser claims.
+- Handheld/panned footage is retained for exploratory analysis, detector
+  development, and relative technique review only.
+- The validation-only gravity-mpp path remains in the codebase for use on
+  future stationary clips; it should converge with anatomical mpp on
+  tripod footage and act as a built-in scale sanity check.
+
+---
+
 ## Upcoming Work
 
-### Phase 9d — Apparatus-Anchored Mpp at Takeoff Zone
+### Athlete A Stationary Capture Session
 
-The remaining ~1 m/s residual on the tripod control isolates the next blocker:
-anatomical mpp underestimates true scale at the takeoff zone. Use the labelled
-upright separation (4.02 m, IAAF spec) as a third independent scale source,
-calibrated specifically at the takeoff frame. Plan in
-`memory/plans/opus_plan_current.md`.
+Minimum useful setup:
+
+- Tripod or fixed phone, no panning or zoom during the jump.
+- 60 fps preferred (30 fps acceptable as a baseline).
+- Landscape orientation.
+- Full body visible from final approach through landing.
+- Bar height in filename (for example, include the attempt height as
+  `_1.80` in the stem).
+- Bar and uprights visible in frame where geometry allows.
+
+Two synchronised fixed cameras with a sync clap/flash is the gold-standard
+progression (enables DLT triangulation) but is not required for the first
+validation pass.
 
 ### Phase 10 — Personal Data Fine-Tuning
 
-- Gated on Phase 9d validation against the tripod and 4 bar-tagged labelled
-  clips.
-- `scripts/finetune_personal.py` exists; do not run until 9d acceptance hits.
+- Gated on receipt of at least one usable stationary session from Athlete A.
+- `scripts/finetune_personal.py` exists; do not run until the new footage
+  passes the truth-evaluator gates: gravity-mpp should converge with
+  anatomical mpp to within ≤0.3 m/s, takeoff vh should land in the
+  2.5-5.5 m/s elite band.
 
 ### Phase 11 — Validation and Paper
 
 - Compare predicted vs. measured jump heights on held-out attempts.
 - Confirm sensitivity analysis marginal gains are plausible against coaching intuition.
-- Write up methods and results.
+- Write up methods and results, including the closed-record of why panned
+  footage was abandoned (a useful finding for the paper's "what does not work"
+  section).

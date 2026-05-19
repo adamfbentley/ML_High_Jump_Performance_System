@@ -20,6 +20,9 @@ if str(PROJECT_ROOT) not in sys.path:
 from scripts.analyze_jump_video import parse_bar_height  # noqa: E402
 from src.pose_estimation.egomotion import estimate_camera_motion  # noqa: E402
 from src.pose_estimation.estimators.mediapipe_estimator import MediaPipeEstimator  # noqa: E402
+from src.pose_estimation.gravity_calibration import (  # noqa: E402
+    calibrate_landmarks_with_gravity_mpp,
+)
 from src.pose_estimation.scale_calibration import (  # noqa: E402
     calibrate_landmarks_to_world,
     calibrate_landmarks_with_scene,
@@ -70,6 +73,17 @@ def _extract_poses_with_source_indices(video_path: Path):
 POINT_NAMES = ("left_base", "right_base", "left_top", "right_top")
 
 
+def _point_from_entry(entry: dict, name: str) -> tuple[float, float] | None:
+    value = entry.get("points", {}).get(name)
+    if value is None or len(value) < 2:
+        return None
+    x = float(value[0])
+    y = float(value[1])
+    if not np.isfinite([x, y]).all():
+        return None
+    return x, y
+
+
 def _labels_to_scene_anchors(
     payload: dict,
     target_indices: np.ndarray | None = None,
@@ -80,26 +94,58 @@ def _labels_to_scene_anchors(
     (typically the source indices of MediaPipe's detected frames). When
     omitted, anchors are built at every integer index 0..n_frames-1.
     """
-    if not payload.get("labels"):
+    label_entries = [
+        entry
+        for entry in payload.get("labels", [])
+        if isinstance(entry, dict) and isinstance(entry.get("points"), dict)
+    ]
+    if not label_entries:
         raise ValueError(f"No labelled frames in {payload.get('video_stem', '<unknown>')}")
-    label_frames = np.array([entry["frame"] for entry in payload["labels"]], dtype=float)
     if target_indices is None:
         target = np.arange(int(payload["n_frames"]), dtype=float)
     else:
         target = np.asarray(target_indices, dtype=float)
-    # Only target frames between the first and last labelled source frame are
-    # valid; outside that range we have no apparatus information.
-    in_range = (target >= float(label_frames.min())) & (target <= float(label_frames.max()))
+
     arrays: dict[str, np.ndarray] = {}
+    valid_counts = np.zeros(len(target), dtype=np.int32)
     for name in POINT_NAMES:
-        x = np.array([entry["points"][name][0] for entry in payload["labels"]], dtype=float)
-        y = np.array([entry["points"][name][1] for entry in payload["labels"]], dtype=float)
-        x_full = np.interp(target, label_frames, x)
-        y_full = np.interp(target, label_frames, y)
-        x_full[~in_range] = np.nan
-        y_full[~in_range] = np.nan
-        arrays[name] = np.column_stack([x_full, y_full])
-    confidence = np.where(in_range, 1.0, 0.0)
+        by_frame: dict[int, tuple[float, float]] = {}
+        for entry in label_entries:
+            point = _point_from_entry(entry, name)
+            if point is not None:
+                by_frame[int(entry["frame"])] = point
+
+        interpolated = np.full((len(target), 2), np.nan, dtype=np.float64)
+        if by_frame:
+            label_frames = np.array(sorted(by_frame), dtype=float)
+            xy = np.array([by_frame[int(frame)] for frame in label_frames], dtype=float)
+            if len(label_frames) == 1:
+                # A single partial point is only known at that exact source
+                # frame; do not smear it across unlabelled time.
+                in_range = np.isclose(target, label_frames[0])
+                interpolated[in_range] = xy[0]
+            else:
+                in_range = (
+                    (target >= float(label_frames.min()))
+                    & (target <= float(label_frames.max()))
+                )
+                interpolated[in_range, 0] = np.interp(
+                    target[in_range],
+                    label_frames,
+                    xy[:, 0],
+                )
+                interpolated[in_range, 1] = np.interp(
+                    target[in_range],
+                    label_frames,
+                    xy[:, 1],
+                )
+        arrays[name] = interpolated
+        valid_counts += np.isfinite(interpolated).all(axis=1)
+
+    if not any(np.isfinite(arr).any() for arr in arrays.values()):
+        raise ValueError(f"No usable labelled points in {payload.get('video_stem', '<unknown>')}")
+
+    confidence = valid_counts.astype(np.float64) / float(len(POINT_NAMES))
     return SceneAnchors(
         upright_left_base_px=arrays["left_base"],
         upright_right_base_px=arrays["right_base"],
@@ -107,7 +153,10 @@ def _labels_to_scene_anchors(
         upright_right_top_px=arrays["right_top"],
         confidence=confidence,
         bar_height_m=payload.get("bar_height_m"),
-        crossbar_confirmed=in_range.astype(bool),
+        # For truth homography, "confirmed" means all four hand-labelled
+        # correspondences are available at the target frame. Partial labels are
+        # still retained above for pairwise scale evidence and future tooling.
+        crossbar_confirmed=valid_counts >= len(POINT_NAMES),
     )
 
 
@@ -228,6 +277,7 @@ def evaluate_label_file(label_path: Path, thigh_m: float, shank_m: float) -> dic
         else 0.0,
     }
     truth_vx = _x_velocity_from_landmarks(truth_landmarks, fps)
+    takeoff_idx = _takeoff_index(landmarks_3d_world, fps)
 
     anatomical = calibrate_landmarks_to_world(
         landmarks_2d,
@@ -251,6 +301,27 @@ def evaluate_label_file(label_path: Path, thigh_m: float, shank_m: float) -> dic
         camera_motion=motion,
     )
 
+    gravity, gravity_info = (
+        calibrate_landmarks_with_gravity_mpp(
+            landmarks_2d,
+            landmarks_3d_world,
+            fps=fps,
+            image_width=width,
+            image_height=height,
+            takeoff_frame=takeoff_idx,
+            camera_motion=motion,
+        )
+        if takeoff_idx is not None
+        else (
+            np.full_like(landmarks_3d_world, np.nan, dtype=np.float32),
+            {
+                "method": "gravity_mpp_unavailable",
+                "accepted": False,
+                "decision_reason": "missing_takeoff_frame",
+            },
+        )
+    )
+
     detected_anchors = detect_scene_anchors(video_path, bar_height_m=bar_height)
     detected, detected_info = calibrate_landmarks_with_scene(
         landmarks_2d,
@@ -266,10 +337,10 @@ def evaluate_label_file(label_path: Path, thigh_m: float, shank_m: float) -> dic
     modes = {
         "anatomical": (anatomical, {"method": "anatomical"}),
         "egomotion": (egomotion, egomotion_info),
+        "egomotion_gravity_mpp": (gravity, gravity_info),
         "scene_homography": (detected, detected_info),
     }
 
-    takeoff_idx = _takeoff_index(landmarks_3d_world, fps)
     truth_covers_takeoff = (
         takeoff_idx is not None
         and _truth_in_takeoff_window(truth_landmarks, truth_valid, takeoff_idx)
@@ -306,8 +377,43 @@ def evaluate_label_file(label_path: Path, thigh_m: float, shank_m: float) -> dic
             "vh_takeoff_error_vs_truth_mps": takeoff_err,
             "median_vh_error_mps": median_err,
             "p95_vh_error_mps": p95_err,
+            "accepted": info.get("accepted"),
+            "decision_reason": info.get("decision_reason"),
+            "gravity_mpp": info.get("mpp"),
+            "gravity_r2": info.get("y_r_squared"),
+            "gravity_horizontal_accel_fraction": info.get("horizontal_accel_fraction"),
         }
     return out
+
+
+def _aggregate_mode_errors(results: list[dict]) -> dict[str, dict[str, float | int]]:
+    modes = sorted({mode for result in results for mode in result["modes"]})
+    aggregates: dict[str, dict[str, float | int]] = {}
+    for mode in modes:
+        errors: list[float] = []
+        accepted_count = 0
+        available_count = 0
+        reason_counts: dict[str, int] = {}
+        for result in results:
+            values = result["modes"].get(mode, {})
+            err = values.get("vh_takeoff_error_vs_truth_mps")
+            if isinstance(err, (int, float)) and np.isfinite(err):
+                errors.append(float(err))
+                available_count += 1
+            if values.get("accepted") is True:
+                accepted_count += 1
+            reason = values.get("decision_reason")
+            if isinstance(reason, str):
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        aggregates[mode] = {
+            "n": len(errors),
+            "available_count": available_count,
+            "accepted_count": accepted_count,
+            "median_error_mps": float(np.nanmedian(errors)) if errors else float("nan"),
+            "p95_error_mps": float(np.nanpercentile(errors, 95.0)) if errors else float("nan"),
+            "reason_counts": reason_counts,
+        }
+    return aggregates
 
 
 def main() -> None:
@@ -339,8 +445,20 @@ def main() -> None:
             print(
                 f"  {mode}: method={values['method']:>22} "
                 f"vh_takeoff={mode_str} m/s  err_vs_truth={err_str} m/s  "
+                f"reason={values.get('decision_reason') or 'n/a'} "
                 f"(per-frame median_err={values['median_vh_error_mps']:.2f})"
             )
+    print("AGGREGATE takeoff-vh error vs hand-labelled truth")
+    for mode, values in _aggregate_mode_errors(results).items():
+        median = values["median_error_mps"]
+        p95 = values["p95_error_mps"]
+        median_str = f"{median:.2f}" if np.isfinite(median) else "nan"
+        p95_str = f"{p95:.2f}" if np.isfinite(p95) else "nan"
+        print(
+            f"  {mode}: n={values['n']} accepted={values['accepted_count']} "
+            f"median_err={median_str} m/s p95_err={p95_str} m/s "
+            f"reasons={values['reason_counts']}"
+        )
 
 
 if __name__ == "__main__":
