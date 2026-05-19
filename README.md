@@ -3,7 +3,7 @@
 > Early-stage research code for personalised high-jump analysis using markerless pose estimation, physics-informed neural networks (PINNs), and optimisation.
 
 This repository is a research collaboration with the national
-champion high jumper and Biomedicine PhD student. The project
+champion in high jump. The project
 is exploring whether machine learning and physics-based modelling can turn
 video of Imogen's jumps into useful biomechanical feedback and precise evaluation of physical plausibillity of technique optimisations.
 
