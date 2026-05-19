@@ -86,3 +86,17 @@
   (cv2 quirk on some MP4 encodings) are tolerated. Truth evaluator aligns
   labels to MediaPipe's source-frame indices (MediaPipe drops undetected
   frames, so output index ≠ source frame index).
+
+## 2026-05-05
+
+- Future capture policy changed: stationary footage is now required for
+  training-grade physics, Phase 10 personal fine-tuning, and optimiser claims.
+  Handheld/panned footage is retained for exploratory analysis, detector
+  development, and relative technique review, but should not be admitted to
+  personalised training unless it passes strict calibration gates.
+- Next data-collection step: ask Imogen for a small stationary validation set
+  before spending further effort rescuing panned footage. Minimum useful setup:
+  tripod/fixed phone, no panning or zoom, 60 fps preferred, landscape, full
+  body visible from final approach through landing, bar height in filename, and
+  bar/uprights visible where possible. Two fixed cameras with sync clap/flash
+  is the preferred gold-standard progression.

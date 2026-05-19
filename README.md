@@ -1,18 +1,30 @@
-# High Jump Biomechanical Analysis System
+# High Jump Biomechanics Research Project
 
-> Personalised high jump technique optimisation using physics-informed neural networks (PINNs), markerless pose estimation, and graph neural networks.
+> Early-stage research code for personalised high-jump analysis using markerless pose estimation, physics-informed neural networks (PINNs), and optimisation.
 
+This repository is a research collaboration between Imogen Skelton, a national
+champion high jumper and Biomedicine PhD student, and Adam Bentley. The project
+is exploring whether machine learning and physics-based modelling can turn
+video of Imogen's jumps into useful biomechanical feedback: what happened in a
+specific attempt, which constraints limited the jump, and which changes might
+improve future performance.
 
+The long-term aim is a specialist AI biomechanics workflow: capture a jump,
+recover physically credible kinematics, estimate forces and constraints with a
+PINN-based model, then run optimisation/sensitivity analysis to suggest
+training-relevant changes. This is not a finished consumer app yet. Current work
+is focused on validation, calibration, and finding the filming setup needed for
+scientifically defensible results.
 
----
+## Current Focus
 
-## The Vision
-
-A system where you film your high jump attempts on a phone, enter your height/weight/limb lengths, and get back:
-- Exact physics of your run-up curve, plant, takeoff angle, and bar clearance
-- Actionable improvements: *"increase horizontal velocity by 0.3 m/s"*, *"adjust penultimate step braking"*, *"optimal takeoff angle ≈ 22°"*
-- What-if simulations: *"what happens if I speed up my approach by 0.5 m/s?"*
-- Predicted jump height gains from each change
+- Build a reliable end-to-end pipeline from high-jump video to takeoff, flight,
+  and bar-clearance metrics.
+- Validate which measurements can be trusted from single-camera footage.
+- Train and benchmark PINN dynamics models on public biomechanics data before
+  personalising them to Imogen's stationary footage.
+- Use the optimiser as a research tool once the video-derived measurements pass
+  quality gates.
 
 ## Project Structure
 
