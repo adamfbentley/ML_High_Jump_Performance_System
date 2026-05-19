@@ -2,17 +2,15 @@
 
 > Early-stage research code for personalised high-jump analysis using markerless pose estimation, physics-informed neural networks (PINNs), and optimisation.
 
-This repository is a research collaboration between Imogen Skelton, a national
-champion high jumper and Biomedicine PhD student, and Adam Bentley. The project
+This repository is a research collaboration with the national
+champion high jumper and Biomedicine PhD student, Imogen Skelton. The project
 is exploring whether machine learning and physics-based modelling can turn
-video of Imogen's jumps into useful biomechanical feedback: what happened in a
-specific attempt, which constraints limited the jump, and which changes might
-improve future performance.
+video of Imogen's jumps into useful biomechanical feedback and precise evaluation of physical plausibillity of technique optimisations.
 
 The long-term aim is a specialist AI biomechanics workflow: capture a jump,
 recover physically credible kinematics, estimate forces and constraints with a
 PINN-based model, then run optimisation/sensitivity analysis to suggest
-training-relevant changes. This is not a finished consumer app yet. Current work
+training-relevant changes. Current work
 is focused on validation, calibration, and finding the filming setup needed for
 scientifically defensible results.
 
