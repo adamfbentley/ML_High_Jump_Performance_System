@@ -38,7 +38,8 @@ scripts/
   download_datasets.py
   render_pose_overlay.py
 
-tests/                  190 non-PINN tests currently passing
+tests/                  227 tests covering data, kinematics, pose calibration,
+                        PINN physics, optimisation, and tooling
 tools/memory/           Local RAG build/query scripts for agent context
 memory/                 Tracked notes/plans/experiments plus ignored vector index
 experiments/configs/    Training configuration
@@ -206,7 +207,7 @@ Phase 9a and 9b are implemented and tested:
 - Phase 9b: contact-anchored takeoff-frame selection.
 - Bar-height parsing fixed for numeric extensions such as `.mp4`.
 - Full private reprocess completed: 45/45 reports and 45/45 cached samples.
-- Full non-PINN suite: 190 passing.
+- Full local suite: 227 passing.
 
 Phase 10 personal fine-tuning is blocked. Aggregate reprocess metrics are not
 training-grade:
