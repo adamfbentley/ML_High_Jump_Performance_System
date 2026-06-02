@@ -2,7 +2,8 @@
 extracted kinematics, producing a personalised model.
 
 Pipeline:
-    BiomechanicalSamples (.npz cache from analyze_jump_video.py --save-samples)
+    admitted BiomechanicalSamples (.npz cache + local admission manifest)
+        → admission-manifest filter
         → optional plausible-scale filter (Phase 9a guardrail)
         → DynamicsDataset windowing
         → load best_model.pth
@@ -23,7 +24,12 @@ Usage:
         --output data/models/personal/imogen_finetuned.pth \
         --epochs 200 --lr 1e-4
 
-Phase 9a guardrail:
+Phase 10 guardrails:
+    `analyze_jump_video.py --save-samples` writes only training-grade samples
+    and records every admission decision in the local cache manifest.
+    Fine-tuning refuses legacy mixed caches without that manifest.
+
+Phase 9a scale guardrail:
     Single-camera scale calibration is broken on ~60% of clips (peak
     CoM > 3 m, physically impossible).  Fine-tuning on those clips would
     teach the model garbage CoM dynamics.  By default we keep only clips
@@ -39,16 +45,14 @@ import sys
 import time
 from pathlib import Path
 
-import numpy as np
-
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import torch
-from torch.utils.data import DataLoader
-
+from src.data_pipeline.admission import admitted_sample_paths
 from src.data_pipeline.sample import BiomechanicalSample
 from src.data_pipeline.torch_datasets import DynamicsDataset
 from src.pinn.physics.inverse_dynamics import InverseDynamicsPINN
+from torch.utils.data import DataLoader
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
@@ -61,18 +65,19 @@ def load_samples(
     samples_dir: Path,
     max_peak_com_m: float | None = 3.0,
 ) -> list[BiomechanicalSample]:
-    """Load all .npz samples from `samples_dir`, optionally filtering by scale.
+    """Load admitted .npz samples from `samples_dir`, optionally filtering by scale.
 
     The scale filter rejects clips whose peak CoM height exceeds
     `max_peak_com_m`.  An elite female high jumper's peak CoM in flight
     is ~2.2–2.7 m; values above 3 m indicate broken scale calibration
     (see ROADMAP Phase 9a).
     """
-    paths = sorted(samples_dir.glob("*.npz"))
+    paths = admitted_sample_paths(samples_dir)
     if not paths:
         raise FileNotFoundError(
-            f"No .npz samples in {samples_dir}.  Run "
-            f"`analyze_jump_video.py <video_dir> --save-samples {samples_dir}` first."
+            f"No admitted .npz samples in {samples_dir}. Run "
+            f"`analyze_jump_video.py <video_dir> --save-samples {samples_dir}` "
+            "into a fresh directory first."
         )
 
     kept: list[BiomechanicalSample] = []
@@ -179,8 +184,10 @@ def finetune(
         for batch in loader:
             optimizer.zero_grad()
             x = batch["input"].to(device)            # (B, T, 7)
-            B, T, D = x.shape
-            pred = model(x.reshape(B * T, D)).reshape(B, T, -1)  # (B, T, 6)
+            batch_size, window_size, input_dim = x.shape
+            pred = model(x.reshape(batch_size * window_size, input_dim)).reshape(
+                batch_size, window_size, -1
+            )  # (B, T, 6)
 
             data_loss = torch.tensor(0.0, device=device)
             if "target_grf" in batch:

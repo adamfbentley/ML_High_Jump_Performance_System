@@ -363,7 +363,7 @@ After the 9a/9b fixes, **0/45** reports have negative takeoff angles or velociti
 | Differentiable optimiser + sensitivity analysis | ✅ Complete and tested |
 | Video analysis end-to-end pipeline | ✅ Complete — stationary-footage tooling added June 2026 |
 | Athlete priority metrics (Imogen alignment) | ✅ Implemented |
-| Test suite | ✅ 263 non-PINN tests passing |
+| Test suite | ✅ 272 non-PINN / 277 total tests passing |
 | Public datasets downloaded (Zenodo CMJ, CoD, DVJ) | ✅ Done |
 | PINN pre-training run (3000 epochs) | ✅ Done — `final_model.pth` saved |
 | Imogen's 45 panned videos processed | ✅ Re-processed Phase 9a/9b with 45 cached samples |
@@ -372,11 +372,11 @@ After the 9a/9b fixes, **0/45** reports have negative takeoff angles or velociti
 | Single-camera scale calibration on panned footage | ❌ Closed — gravity-mpp and egomotion cannot reach training-grade on handheld clips |
 | Hand-label evaluation infrastructure | ✅ Phase 9c — truth evaluator, label tool, 5 clips labelled |
 | Gravity-mpp validation module | ✅ Phase 9e — validation-only; failed on handheld as predicted |
-| Stationary-footage admission tooling | ✅ June 2026 — `--capture-mode stationary`, `--roi-crop on`, `remap_normalized_to_full_frame`, windowed pose-validity gate, takeoff-anchor review all shipped and tested |
+| Stationary-footage admission tooling | ✅ June 2026 — explicit fixed-camera confirmation, `--roi-crop on`, windowed pose-validity gate, strengthened anchor review, admitted-only cache, and local manifest all shipped and tested |
 | Stationary capture policy | ✅ Locked — required for training-grade physics, Phase 10, and optimiser claims |
-| Stationary pilot validation | 🟦 Promising — 2/3 newer clips pass implemented report gates; Phase 10 prep issues remain |
+| Stationary pilot validation | 🟦 Promising — 2/3 newer clips pass implemented report gates; larger 60 fps session still required |
 | AddBiomechanics dataset downloaded | ⬜ Pending (highest-quality GRF pre-training data) |
-| Personal data fine-tuning loop | ⬜ Blocked — add admitted-only caching, explicit fixed-camera confirmation, tighter anchor threshold, and a larger session |
+| Personal data fine-tuning loop | ⬜ Blocked — collect a larger stationary session and reserve a held-out subset |
 | Optimiser outputs | ⬜ Stale — do not refresh until larger stationary session validated |
 
 ---
@@ -510,22 +510,26 @@ selecting an approach stride well before toe-off after later tracking drops out.
 
 **Update 3 June 2026 — admission tooling shipped:**
 
-Four gaps closed; 263/263 non-PINN tests pass.
+Four initial gaps closed; the subsequent cache-boundary hardening brings the
+suite to 272/272 non-PINN tests passing.
 
-1. **`--capture-mode stationary`** (scripts/analyze_jump_video.py): asserted
-   fixed-camera flag removes the `no_scene_fixed_horizontal_source` training
-   gate. `capture_mode` and `scene_fixed_horizontal_source: "stationary_camera"`
-   now recorded in every report's calibration block. Default handheld behaviour
-   unchanged.
+1. **`--capture-mode stationary --stationary-camera-confirmed`**
+   (scripts/analyze_jump_video.py): an explicit operator review that the camera
+   did not pan, tilt, zoom, or move removes the
+   `no_scene_fixed_horizontal_source` training gate. `capture_mode`,
+   `stationary_camera_confirmed`, and
+   `scene_fixed_horizontal_source: "stationary_camera"` are recorded in every
+   report's calibration block. Default handheld behaviour is unchanged.
 
 2. **Takeoff-anchor review** (`_validate_takeoff_anchor`): after selecting the
-   last pre-peak ankle-ground contact, the validator checks (a) vy > 0 at
-   the candidate frame and peak CoM follows, and (b) the frame lead does not
+   last pre-peak ankle-ground contact, the validator checks (a) vy >= 2.0 m/s
+   at the candidate frame and peak CoM follows, and (b) the frame lead does not
    exceed 2 × t_apex × fps (projectile flight-time physics, 2× margin).
    `select_takeoff_frame_details` now returns a 4-tuple including
    `takeoff_anchor_review_passed`. Argmax fallback always returns False.
    `report.quality.takeoff_anchor_review_passed` published in every report.
-   `"takeoff_anchor_review_failed"` added to training_grade_failures when False.
+   `"takeoff_anchor_review_failed"` rejects both kinematics grade and training
+   grade when False.
 
 3. **`--roi-crop on`** (MediaPipeEstimator / analyze_jump_video.py): two-pass
    athlete-crop strategy. Pass 1 detects on the full frame to locate the athlete;
@@ -568,7 +572,8 @@ pass for the newer trio. Recapture protocol:
 - Shoot at 60 fps (improves contact detection margin).
 - Keep landscape orientation; full approach through landing in frame.
 - Bar and uprights visible where possible.
-- `--capture-mode stationary --thigh 0.43 --shank 0.47` on production run;
+- `--capture-mode stationary --stationary-camera-confirmed --thigh 0.43
+  --shank 0.47` on production run;
   `--roi-crop on` optional once athlete fills the frame.
 
 Minimum useful setup:
@@ -587,17 +592,27 @@ validation pass.
 
 ### Phase 10 — Personal Data Fine-Tuning
 
-**Status: blocked pending an admitted-only cache path and a larger session.**
+**Status: blocked pending a larger session and held-out split.**
 
-Two of the newer clips pass the implemented report gates. Do not submit a
-folder-wide `--save-samples` output to `scripts/finetune_personal.py`: the
-analyser currently caches every processed clip, and the fine-tune loader
-filters only peak CoM rather than `training_grade`. Add admitted-only caching
-first. Then collect a dedicated 60 fps session (athlete ≥ 25 % of frame height)
-of 8-12 attempts at a range of bar heights before running fine-tuning.
+Phase 10 prep hardening is complete. The analyser caches only `training_grade`
+clips, records every admission decision in ignored local
+`_admission_manifest.json`, and the fine-tune loader refuses legacy mixed
+caches. Explicit fixed-camera confirmation and the stricter takeoff-anchor
+threshold are also enforced. Collect a dedicated 60 fps session (athlete ≥ 25 %
+of frame height) of 8-12 attempts at a range of bar heights before running a
+real fine-tune.
 
 Do not refresh optimiser claims until the fine-tuned model is validated on a
 held-out subset of the larger session.
+
+**Raw anthropometry cross-check (2026-06-03):** the pre-calibration stationary
+diagnostic was run across all five local clips with and without ROI crop, using
+total leg length only as the scale anchor. Aggregate held-out lower-limb
+proportions are credible: raw MediaPipe-world shank and thigh estimates are
+within 2 % of taped measurements, while 2D projected estimates are within 8 %.
+Arm length remains underestimated by roughly 15-22 %, so arm landmarks should
+not be used as a calibration anchor yet. This supports the lower-limb
+anatomical branch but does not validate absolute scene scale or run-up velocity.
 
 ### Phase 11 — Validation and Paper
 

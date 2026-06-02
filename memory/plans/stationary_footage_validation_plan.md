@@ -136,6 +136,20 @@ anchor, high segment spread). They are not part of the path-forward protocol.
 report gates; one requires improved ankle tracking near contact. Phase 10
 readiness still requires the prep items below.
 
+**Raw anthropometry cross-check (2026-06-03):**
+
+The pre-calibration diagnostic ran across all five clips with and without ROI
+crop. Total leg length was the single scale anchor; shank, thigh, and arm were
+held-out proportion checks. Aggregate raw MediaPipe-world shank and thigh
+estimates are within 2 % of taped measurements. The 2D projected checks are
+within 8 % for those lower-limb segments. Arm length is underestimated by
+roughly 15-22 % in both modes, so arm landmarks are not suitable calibration
+anchors yet. ROI crop does not materially change that conclusion.
+
+This is evidence for the lower-limb anatomical proportions only. It does not
+validate absolute scene scale, approach-direction velocity, or optimiser
+claims.
+
 ## Required Prep
 
 1. Completed: add a `--bar-height` override to the production analysis CLI.
@@ -144,16 +158,18 @@ readiness still requires the prep items below.
    private review overlay for all five clips.
 3. Completed (2026-06-03): `_validate_takeoff_anchor()` added to
    `scripts/analyze_jump_video.py`. After contact-interval selection, checks
-   (a) vy > 0 and peak CoM follows, (b) frame lead ≤ 2 × t_apex × fps.
+   (a) vy >= 2.0 m/s and peak CoM follows, (b) frame lead ≤ 2 × t_apex × fps.
    `select_takeoff_frame_details` now returns a 4-tuple including
    `takeoff_anchor_review_passed`. Argmax fallback always returns False.
-   `_quality_block` appends `"takeoff_anchor_review_failed"` when False.
+   `_quality_block` rejects both kinematics grade and training grade when False.
    `report.quality.takeoff_anchor_review_passed` published in every report.
 4. Completed (2026-06-03): `--capture-mode {handheld,stationary}` flag added
-   to `scripts/analyze_jump_video.py`. When stationary and anatomical path
-   (no egomotion / no scene-anchor), `_calibration_source` returns
-   `"stationary_camera"` and the `no_scene_fixed_horizontal_source` training
-   gate is not appended. `calibration_info["capture_mode"]` and
+   to `scripts/analyze_jump_video.py`. An additional explicit
+   `--stationary-camera-confirmed` operator review is required before the
+   anatomical path (no egomotion / no scene-anchor) returns
+   `"stationary_camera"` and removes the `no_scene_fixed_horizontal_source`
+   training gate. `calibration_info["capture_mode"]`,
+   `calibration_info["stationary_camera_confirmed"]`, and
    `calibration_info["scene_fixed_horizontal_source"]` recorded in every report.
    Default `handheld` behaviour is byte-for-byte unchanged.
    Opt-in ROI crop: `--roi-crop on` enables two-pass athlete-crop in
@@ -163,10 +179,12 @@ readiness still requires the prep items below.
    Stricter `pose_validity_pct` metric: replaced >=4-of-33 with all-8-key-joints
    (shoulders/hips/knees/ankles, idx 11,12,23,24,25,26,27,28), matching
    `PoseFrame.is_valid`. 60 % admission threshold unchanged.
-   All focused tests pass; non-PINN suite is 263/263 green.
-5. Add admitted-only sample caching before personal fine-tuning. The analyser
-   currently saves every processed clip, while the fine-tune loader filters
-   only peak CoM rather than `training_grade`.
+   All focused tests pass; the current non-PINN suite is 272/272 green.
+5. Completed (2026-06-03): admitted-only caching added. The analyser writes
+   `.npz` only for `training_grade` clips and records every decision in ignored
+   local `_admission_manifest.json`. The fine-tune loader reads only
+   admitted-and-saved entries and refuses legacy mixed caches without the
+   manifest.
 6. Add a small stationary-report aggregator only if needed. It should consume
    production reports, apply the clip-level gates below, and write raw per-clip
    output only under an ignored local results directory.
@@ -247,10 +265,11 @@ If the pilot passes:
 
 1. Completed: `stationary_camera` source, takeoff-anchor review, ROI crop,
    and stricter pose-validity metric are all shipped and tested (2026-06-03).
-   Re-run clips with `--capture-mode stationary --roi-crop on` to evaluate
-   whether pose_validity_pct now clears the 60 % gate.
-2. Pending: implement admitted-only sample caching. Do not submit a mixed
-   folder-wide cache to personal fine-tuning.
+   Re-run clips with `--capture-mode stationary --stationary-camera-confirmed
+   --roi-crop on` to evaluate whether pose_validity_pct now clears the 60 %
+   gate.
+2. Completed: admitted-only sample caching and the local admission manifest
+   boundary are implemented and verified end to end (2026-06-03).
 3. Collect or process a larger stationary session for personal fine-tuning and
    a held-out validation subset.
 4. Keep optimiser claims blocked until the larger set is validated.
@@ -266,18 +285,26 @@ If the pilot fails:
 
 ## Tests For Tooling Changes
 
-All focused tests shipped (2026-06-03). 263/263 non-PINN tests pass.
+All focused tests shipped (2026-06-03). 272/272 non-PINN and 277/277 total
+tests pass.
 
 - CLI bar-height override precedence over filename parsing — done.
 - overlay fps derived from decoded timestamp cadence — done.
 - explicit report-output parent directories created on demand — done.
-- `stationary_camera` source admitted only when explicitly asserted; handheld
-  default still yields `no_scene_fixed_horizontal_source` — done.
+- `stationary_camera` source admitted only when stationary mode is paired with
+  explicit fixed-camera confirmation; handheld and unconfirmed stationary
+  modes still yield `no_scene_fixed_horizontal_source` — done.
 - `_validate_takeoff_anchor` rejects approach-stride and passes true toe-off;
-  argmax fallback flagged, not silently accepted — done.
+  weak positive launch velocity and argmax fallback are flagged, not silently
+  accepted — done.
 - bbox → full-frame normalised remap round-trips correctly (pure function) — done.
 - stricter key-joint pose_validity metric: all-8-key-joints required; old
   4-of-33 criterion no longer passes when key joints are absent — done.
 - clip-level rejection when pose coverage or contact detection fails — done.
+- kinematics-grade rejection when anchor review fails — done.
+- training-grade-only caching, manifest recording, and legacy mixed-cache
+  refusal — done.
+- raw stationary anthropometry diagnostic recovers synthetic proportions and
+  excludes low-visibility chains — done.
 - aggregate/report output contains no raw clip identifiers — by design (video
   stem only, not full path; raw paths gitignored under data/results/).

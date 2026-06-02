@@ -43,17 +43,20 @@ Updated 2026-06-03 after the stationary admission-tooling audit.
   enough approach-direction coverage for training-grade takeoff velocity?
   Two newer clips pass the implemented report gates, but collect a closer
   60 fps session before personal fine-tuning.
-- What minimum launch-velocity threshold should `_validate_takeoff_anchor`
-  require? The current positive-only check can accept a weak approach stride
-  close to apex.
-- How should admitted-only caching be enforced before personal fine-tuning?
-  The analyser currently saves every processed sample, while the fine-tune
-  loader filters only peak CoM rather than `training_grade`.
-- Require confirmed fixed-camera capture in the local manifest, the report, or
-  both before emitting a `stationary_camera` horizontal source?
 - Is one tripod side-view sufficient for the run-up direction velocity, or
   do we need an end-of-runway camera to capture the approach-direction
   component that side-view projects away?
 - Are there any panned clips worth retaining for *relative* analysis (stride
   rhythm, joint angles, body alignment) even though they cannot give
   training-grade translational metrics?
+
+## Closed (2026-06-03 prep hardening)
+
+- ~~What launch-velocity floor should anchor review require?~~ Use
+  `vy >= 2.0 m/s`; a merely positive value can admit a weak stride near apex.
+- ~~How should admitted-only caching be enforced?~~ Save `.npz` only for
+  `training_grade` clips, record every decision in ignored local
+  `_admission_manifest.json`, and refuse legacy mixed caches at fine-tune load.
+- ~~Where should fixed-camera confirmation live?~~ Require explicit CLI
+  operator confirmation and publish it in both the report and local admission
+  manifest before emitting the `stationary_camera` source.

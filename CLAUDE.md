@@ -33,7 +33,7 @@ onboarding prompt. The optional local RAG tooling is parked for now.
 ## Quick commands
 
 ```bash
-# Run the full test suite (currently 263 passing non-PINN)
+# Run the full non-PINN test suite
 .venv/Scripts/python.exe -m pytest tests/ --ignore=tests/test_pinn -q
 
 # Full suite including PINN
@@ -46,11 +46,13 @@ rg -n "stationary|stationary_camera|Phase 10" memory ROADMAP.md
 .venv/Scripts/python.exe scripts/analyze_jump_video.py "<stationary-dir>" \
     --thigh 0.43 --shank 0.47 \
     --capture-mode stationary \
+    --stationary-camera-confirmed \
     --roi-crop on \
     --save-samples <ignored-samples-dir>
 
-# Dry-run personal fine-tuning (loads cached samples, applies Phase 9a guardrail)
-.venv/Scripts/python.exe scripts/finetune_personal.py --dry-run
+# Dry-run personal fine-tuning (loads the admitted cache, applies guardrails)
+.venv/Scripts/python.exe scripts/finetune_personal.py \
+    --samples-dir <ignored-samples-dir> --dry-run
 
 # Smoke-test on a single video
 .venv/Scripts/python.exe scripts/analyze_jump_video.py "<video-file>"
@@ -58,18 +60,20 @@ rg -n "stationary|stationary_camera|Phase 10" memory ROADMAP.md
 
 ## Current phase (June 2026)
 
-**Phases 9a-9e SHIPPED. Two newer stationary clips pass the implemented report
-gates. Phase 10 remains blocked pending admitted-only caching, explicit
-fixed-camera confirmation, anchor-threshold tightening, and a larger session.**
+**Phases 9a-9e SHIPPED. Stationary admission hardening is complete and two
+newer stationary clips pass the implemented report gates. Phase 10 remains
+blocked pending a larger fixed-camera session with a held-out subset.**
 
-Key pipeline additions shipped 2026-06-03 (all tested, 263 non-PINN passing):
+Key pipeline additions shipped 2026-06-03:
 
-- `--capture-mode stationary` (asserted, never inferred): credits a fixed camera
-  as the scene-fixed horizontal source, removing the `no_scene_fixed_horizontal_source`
-  training gate. Default `handheld` unchanged.
+- `--capture-mode stationary --stationary-camera-confirmed`: requires an
+  explicit operator review that the camera did not pan, tilt, zoom, or move
+  before crediting `stationary_camera` as the scene-fixed horizontal source.
+  Default `handheld` behaviour is unchanged.
 - `_validate_takeoff_anchor()`: after selecting the last pre-peak ground contact,
-  validates (a) vy > 0 and peak follows, (b) frame lead ≤ 2·t_apex·fps. Rejects
-  approach-stride false detections. `quality.takeoff_anchor_review_passed` published.
+  validates (a) vy ≥ 2.0 m/s and peak follows, (b) frame lead ≤ 2·t_apex·fps.
+  Rejects approach-stride false detections. Both `kinematics_grade` and
+  `training_grade` require the published anchor-review result.
 - `--roi-crop on` (off by default): two-pass athlete-crop. Pass 1 locates the
   athlete on the full frame; pass 2 re-detects on the crop and remaps 2D landmarks
   back to full-frame normalised coords via `remap_normalized_to_full_frame` (pure,
@@ -82,17 +86,21 @@ Key pipeline additions shipped 2026-06-03 (all tested, 263 non-PINN passing):
   when the critical window is well-covered. The windowed metric correctly reflects
   what the overlays show.
 
-Stationary pilot outcome (5 clips, 2 captures, `--capture-mode stationary --roi-crop on`):
+Stationary pilot outcome (5 clips, 2 captures, explicitly confirmed fixed camera):
 
 - 2/3 newer landscape clips: **training_grade = True**. Takeoff angles 41–43°,
   vh 3.57–3.60 m/s, window pose validity 70–73 %, contact + anchor review passed.
 - 1/3 newer clip: fails — ankle contact detection failure only; physics in-range.
 - Both earlier controls: not path-forward (approach-stride anchor, high spread).
+- Raw pre-calibration proportion check: lower-limb shank/thigh estimates are
+  credible across the local clips; arm length remains underestimated and must
+  not be used as a scale anchor. This does not validate absolute scene scale.
 
-Do **not** fine-tune or refresh optimiser claims yet. The analyser currently
-caches every processed clip when `--save-samples` is supplied, while the
-fine-tune loader filters only peak CoM. Add admitted-only caching before using
-the two passing clips, then collect a larger stationary session. Follow
+The analyser now caches only `training_grade` clips when `--save-samples` is
+supplied, records every decision in ignored `_admission_manifest.json`, and
+fine-tuning refuses legacy mixed caches without that manifest. Do **not** run a
+real fine-tune or refresh optimiser claims yet: collect a larger stationary
+session and reserve a held-out subset first. Follow
 `memory/plans/stationary_footage_validation_plan.md`.
 
 ## Agent memory

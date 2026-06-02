@@ -153,3 +153,21 @@
   current positive-only check can accept a weak approach stride close to apex.
 - Require explicit fixed-camera confirmation in durable local metadata before
   treating the asserted stationary capture mode as admission-grade.
+- Phase 10 prep hardening completed: `stationary_camera` is now emitted only
+  when stationary mode is paired with explicit operator confirmation that the
+  camera did not pan, tilt, zoom, or move.
+- Takeoff-anchor review now requires `vy >= 2.0 m/s`, and anchor-review failure
+  rejects both kinematics grade and training grade.
+- `--save-samples` now caches only `training_grade` samples and records every
+  decision in ignored local `_admission_manifest.json`. The personal fine-tune
+  loader refuses legacy mixed caches without that manifest.
+- Local end-to-end verification recorded five reviewed admission decisions,
+  saved exactly two admitted samples, and completed a dry-run fine-tune load.
+  Keep real fine-tuning blocked until a larger 60 fps stationary session and
+  held-out split are available.
+- Raw pre-calibration anthropometry was checked across the five local
+  stationary clips with and without ROI crop. Lower-limb held-out proportions
+  are credible: MediaPipe-world shank and thigh estimates are within 2 % of
+  taped measurements and 2D projected checks are within 8 %. Arm length is
+  underestimated by roughly 15-22 %, so do not use arm landmarks as a scale
+  anchor. This does not validate absolute scene scale or run-up velocity.

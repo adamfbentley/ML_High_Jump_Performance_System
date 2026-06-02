@@ -24,9 +24,16 @@ drops out.
 The egomotion, automatic scene-anchor, gravity-mpp, and hand-label branches are
 historical panned-footage rescue infrastructure, not stationary admission
 gates. Private fixed-camera pose overlays now exist for all five clips. The
-takeoff-window check and explicit `stationary_camera` source are implemented,
-but the next pass must add admitted-only sample caching, explicit fixed-camera
-confirmation, and a stricter minimum launch threshold for the anchor review.
-Collect a closer 60 fps session before personal fine-tuning. Two-camera DLT
-remains the gold-standard progression. See
+stationary path now requires explicit fixed-camera confirmation, enforces a
+2.0 m/s minimum upward-launch threshold for the anchor review, saves only
+training-grade samples, records every cache decision in ignored local
+`_admission_manifest.json`, and rejects legacy mixed caches at fine-tune load
+time. Collect a closer 60 fps session before personal fine-tuning. Two-camera
+DLT remains the gold-standard progression. See
 `memory/plans/stationary_footage_validation_plan.md`.
+
+The raw pre-calibration stationary anthropometry diagnostic supports the
+lower-limb branch: held-out shank and thigh proportions are close to taped
+measurements across the local clips. Arm landmarks remain materially short and
+must not be used as a calibration anchor. This check does not establish
+absolute scene scale or approach-direction velocity.
