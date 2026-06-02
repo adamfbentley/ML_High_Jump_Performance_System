@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 from scripts.analyze_jump_video import (
     _KEY_JOINT_INDICES,
+    _cache_admitted_sample,
     _calibration_source,
     _quality_block,
     _validate_takeoff_anchor,
@@ -21,6 +22,7 @@ from scripts.analyze_jump_video import (
     select_takeoff_frame_details,
     takeoff_window_pose_validity_pct,
 )
+from src.data_pipeline.admission import admitted_sample_paths, load_admission_manifest
 from src.data_pipeline.sample import BiomechanicalSample, MovementType, SubjectInfo
 from src.kinematics.takeoff_analysis import (
     TakeoffMetrics,
@@ -355,10 +357,20 @@ def test_resolve_bar_height_rejects_non_positive_override():
 
 # ── Change 1: stationary_camera admission source ──────────────────────────
 
-def test_calibration_source_stationary_camera_when_asserted():
-    """capture_mode='stationary' without egomotion/scene_homography → 'stationary_camera'."""
-    source = _calibration_source({"method": "anatomical"}, capture_mode="stationary")
+def test_calibration_source_stationary_camera_when_confirmed():
+    """Reviewed stationary anatomical footage credits the fixed camera source."""
+    source = _calibration_source(
+        {"method": "anatomical"},
+        capture_mode="stationary",
+        stationary_camera_confirmed=True,
+    )
     assert source == "stationary_camera"
+
+
+def test_calibration_source_stationary_camera_requires_confirmation():
+    """Stationary mode alone is not durable confirmation of a fixed camera."""
+    source = _calibration_source({"method": "anatomical"}, capture_mode="stationary")
+    assert source == "none"
 
 
 def test_calibration_source_handheld_default_returns_none():
@@ -373,8 +385,8 @@ def test_calibration_source_egomotion_takes_precedence():
     assert source == "egomotion"
 
 
-def test_quality_block_stationary_does_not_append_no_scene_source():
-    """stationary capture_mode removes 'no_scene_fixed_horizontal_source' from failures."""
+def test_quality_block_confirmed_stationary_does_not_append_no_scene_source():
+    """Confirmed stationary capture removes the missing scene-source failure."""
     result = _quality_block(
         pose_pct=100.0,
         contact_interval_detected=True,
@@ -383,10 +395,29 @@ def test_quality_block_stationary_does_not_append_no_scene_source():
         takeoff_horizontal_mps=3.5,
         takeoff_angle_deg=43.0,
         capture_mode="stationary",
+        stationary_camera_confirmed=True,
         takeoff_anchor_review_passed=True,
     )
     assert "no_scene_fixed_horizontal_source" not in result["training_grade_failures"]
     assert result["scene_fixed_horizontal_source"] == "stationary_camera"
+    assert result["stationary_camera_confirmed"] is True
+
+
+def test_quality_block_unconfirmed_stationary_appends_no_scene_source():
+    """Stationary workflow without operator confirmation is not admission-grade."""
+    result = _quality_block(
+        pose_pct=100.0,
+        contact_interval_detected=True,
+        calibration_info={"method": "anatomical", "scale_info": {}},
+        peak_com_height_m=1.5,
+        takeoff_horizontal_mps=3.5,
+        takeoff_angle_deg=43.0,
+        capture_mode="stationary",
+        stationary_camera_confirmed=False,
+        takeoff_anchor_review_passed=True,
+    )
+    assert "no_scene_fixed_horizontal_source" in result["training_grade_failures"]
+    assert result["stationary_camera_confirmed"] is False
 
 
 def test_quality_block_handheld_appends_no_scene_source():
@@ -418,15 +449,19 @@ def test_generate_report_stationary_credited_in_calibration_block():
         calibration_info={
             "method": "anatomical",
             "capture_mode": "stationary",
+            "stationary_camera_confirmed": True,
             "scene_fixed_horizontal_source": "stationary_camera",
             "scale_info": {},
         },
         pose_validity_pct_value=100.0,
         capture_mode="stationary",
+        stationary_camera_confirmed=True,
     )
     assert report["calibration"]["capture_mode"] == "stationary"
+    assert report["calibration"]["stationary_camera_confirmed"] is True
     assert report["calibration"]["scene_fixed_horizontal_source"] == "stationary_camera"
     assert report["quality"]["scene_fixed_horizontal_source"] == "stationary_camera"
+    assert report["quality"]["stationary_camera_confirmed"] is True
     assert "no_scene_fixed_horizontal_source" not in report["quality"]["training_grade_failures"]
 
 
@@ -456,10 +491,8 @@ def test_validate_takeoff_anchor_rejects_approach_stride():
     """Candidate 50 frames before peak with vy=0.1 (approach stride) is rejected."""
     fps = 30.0
     n = 60
-    # vy=0.1 is positive but the frame lead (50) far exceeds max_lead from physics
+    # vy=0.1 is below the minimum launch threshold and cannot be toe-off.
     com_vel = _make_com_vel_for_anchor_test(n, fps, {5: 0.1})
-    # peak_com_frame=55: 50 frames ahead.
-    # vy_for_lead=max(0.1, 2.0)=2.0 → t_apex=2.0/9.81≈0.204s → max_lead=ceil(2*0.204*30)=13
     assert not _validate_takeoff_anchor(
         candidate_frame=5, peak_com_frame=55, com_vel=com_vel, fps=fps
     )
@@ -472,6 +505,16 @@ def test_validate_takeoff_anchor_rejects_negative_vy():
     com_vel = _make_com_vel_for_anchor_test(n, fps, {5: -0.5})
     assert not _validate_takeoff_anchor(
         candidate_frame=5, peak_com_frame=15, com_vel=com_vel, fps=fps
+    )
+
+
+def test_validate_takeoff_anchor_rejects_weak_positive_vy_near_apex():
+    """A nearby approach-stride contact with weak upward speed is not toe-off."""
+    fps = 30.0
+    n = 20
+    com_vel = _make_com_vel_for_anchor_test(n, fps, {5: 0.1})
+    assert not _validate_takeoff_anchor(
+        candidate_frame=5, peak_com_frame=10, com_vel=com_vel, fps=fps
     )
 
 
@@ -537,6 +580,23 @@ def test_generate_report_valid_contact_anchor_review_passed():
     assert "takeoff_anchor_review_failed" not in report["quality"]["training_grade_failures"]
 
 
+def test_quality_block_anchor_review_failure_rejects_kinematics_grade():
+    """A questionable toe-off frame cannot emit kinematics-grade metrics."""
+    result = _quality_block(
+        pose_pct=100.0,
+        contact_interval_detected=True,
+        calibration_info={"method": "anatomical", "scale_info": {}},
+        peak_com_height_m=1.5,
+        takeoff_horizontal_mps=3.5,
+        takeoff_angle_deg=43.0,
+        capture_mode="stationary",
+        stationary_camera_confirmed=True,
+        takeoff_anchor_review_passed=False,
+    )
+    assert result["kinematics_grade"] is False
+    assert "takeoff_anchor_review_failed" in result["kinematics_grade_failures"]
+
+
 # ── Change 4: stricter key-joint pose_validity metric ─────────────────────
 
 def test_pose_validity_pct_all_key_joints_visible_returns_100():
@@ -582,6 +642,7 @@ def test_quality_block_strict_validity_fails_below_60_pct():
         takeoff_horizontal_mps=3.5,
         takeoff_angle_deg=43.0,
         capture_mode="stationary",
+        stationary_camera_confirmed=True,
         takeoff_anchor_review_passed=True,
     )
     assert "pose_validity_below_threshold" in result["training_grade_failures"]
@@ -597,6 +658,7 @@ def test_quality_block_all_gates_pass_stationary():
         takeoff_horizontal_mps=3.5,
         takeoff_angle_deg=43.0,
         capture_mode="stationary",
+        stationary_camera_confirmed=True,
         takeoff_anchor_review_passed=True,
     )
     assert result["training_grade"] is True
@@ -644,6 +706,7 @@ def test_quality_block_windowed_overrides_global_for_gate():
         takeoff_horizontal_mps=3.5,
         takeoff_angle_deg=43.0,
         capture_mode="stationary",
+        stationary_camera_confirmed=True,
         takeoff_anchor_review_passed=True,
     )
     assert "pose_validity_below_threshold" not in result["training_grade_failures"]
@@ -661,6 +724,7 @@ def test_quality_block_windowed_fails_when_below_threshold():
         takeoff_horizontal_mps=3.5,
         takeoff_angle_deg=43.0,
         capture_mode="stationary",
+        stationary_camera_confirmed=True,
         takeoff_anchor_review_passed=True,
     )
     assert "pose_validity_below_threshold" in result["training_grade_failures"]
@@ -677,7 +741,67 @@ def test_quality_block_reports_both_global_and_windowed():
         takeoff_horizontal_mps=3.5,
         takeoff_angle_deg=43.0,
         capture_mode="stationary",
+        stationary_camera_confirmed=True,
         takeoff_anchor_review_passed=True,
     )
     assert result["pose_validity_pct"] == pytest.approx(35.0)
     assert result["takeoff_window_pose_validity_pct"] == pytest.approx(70.0)
+
+
+# ── Admitted-only sample caching ──────────────────────────────────────────
+
+def test_cache_admitted_sample_writes_training_grade_npz(tmp_path):
+    """Training-grade clips are cached for later personal fine-tuning."""
+    sample = _make_video_sample_for_takeoff_frame_test(
+        contact_slice=slice(8, 12),
+        true_takeoff_frame=11,
+        velocity_spike_frame=20,
+    )
+    report = {"quality": {"training_grade": True}}
+
+    sample_path = _cache_admitted_sample(sample, report, tmp_path / "samples")
+
+    assert sample_path is not None
+    assert sample_path.exists()
+    assert report["sample_cache"]["requested"] is True
+    assert report["sample_cache"]["admitted"] is True
+    assert report["sample_cache"]["saved"] is True
+    assert report["sample_cache"]["decision_reason"] == "training_grade_passed"
+    assert report["sample_cache"]["manifest"].endswith("_admission_manifest.json")
+    assert report["sample_npz"] == str(sample_path)
+    assert admitted_sample_paths(tmp_path / "samples") == [sample_path]
+
+
+def test_cache_admitted_sample_skips_failed_clip(tmp_path):
+    """Rejected clips must not quietly appear in the fine-tuning cache."""
+    sample = _make_video_sample_for_takeoff_frame_test(
+        contact_slice=None,
+        true_takeoff_frame=11,
+        velocity_spike_frame=20,
+    )
+    report = {"quality": {"training_grade": False}}
+    samples_dir = tmp_path / "samples"
+
+    sample_path = _cache_admitted_sample(sample, report, samples_dir)
+
+    assert sample_path is None
+    assert samples_dir.exists()
+    assert "sample_npz" not in report
+    assert report["sample_cache"]["requested"] is True
+    assert report["sample_cache"]["admitted"] is False
+    assert report["sample_cache"]["saved"] is False
+    assert report["sample_cache"]["decision_reason"] == "training_grade_required"
+    assert report["sample_cache"]["manifest"].endswith("_admission_manifest.json")
+    assert admitted_sample_paths(samples_dir) == []
+    manifest = load_admission_manifest(samples_dir)
+    entry = manifest["samples"][sample.trial_id]
+    assert entry["admitted"] is False
+    assert entry["saved"] is False
+
+
+def test_admitted_sample_paths_rejects_legacy_cache_without_manifest(tmp_path):
+    """Fine-tuning must not silently consume a pre-admission mixed cache."""
+    (tmp_path / "legacy.npz").write_bytes(b"not a real sample")
+
+    with pytest.raises(FileNotFoundError, match="Admitted-only cache manifest"):
+        admitted_sample_paths(tmp_path)

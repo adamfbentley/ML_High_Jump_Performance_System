@@ -24,6 +24,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from src.data_pipeline.admission import record_admission_decision
 from src.data_pipeline.sample import BiomechanicalSample, MovementType, SubjectInfo
 from src.kinematics.run_up_analysis import (
     compute_horizontal_velocity,
@@ -68,6 +69,7 @@ class QualityGateConfig:
 
 
 DEFAULT_QUALITY_GATES = QualityGateConfig()
+MIN_TAKEOFF_LAUNCH_VERTICAL_MPS = 2.0
 
 
 def parse_bar_height(filename: str) -> float | None:
@@ -262,19 +264,23 @@ def segment_spread_ratio(calibration_info: dict | None) -> float | None:
     return float(max(scales) / min_scale)
 
 
-def _calibration_source(calibration_info: dict | None, capture_mode: str = "handheld") -> str:
+def _calibration_source(
+    calibration_info: dict | None,
+    capture_mode: str = "handheld",
+    stationary_camera_confirmed: bool = False,
+) -> str:
     """Return the horizontal-reference source for the quality gate.
 
     For panned footage, the source is derived from egomotion or scene_homography.
-    For stationary footage (asserted via --capture-mode stationary), the fixed
-    camera itself is the scene-fixed horizontal reference, so we credit
-    "stationary_camera" when egomotion/scene_homography are not active.
-    This must be asserted — never inferred from the footage.
+    For stationary footage, the fixed camera itself is the scene-fixed horizontal
+    reference, so we credit "stationary_camera" when egomotion/scene_homography
+    are not active. This requires both the asserted capture mode and a separate
+    operator confirmation after reviewing the footage. It is never inferred.
     """
     method = (calibration_info or {}).get("method")
     if method in {"egomotion", "scene_homography"}:
         return method
-    if capture_mode == "stationary":
+    if capture_mode == "stationary" and stationary_camera_confirmed:
         return "stationary_camera"
     return "none"
 
@@ -289,11 +295,16 @@ def _quality_block(
     takeoff_horizontal_mps: float | None,
     takeoff_angle_deg: float | None,
     capture_mode: str = "handheld",
+    stationary_camera_confirmed: bool = False,
     takeoff_anchor_review_passed: bool = True,
     gates: QualityGateConfig = DEFAULT_QUALITY_GATES,
 ) -> dict:
     spread = segment_spread_ratio(calibration_info)
-    source = _calibration_source(calibration_info, capture_mode)
+    source = _calibration_source(
+        calibration_info,
+        capture_mode,
+        stationary_camera_confirmed=stationary_camera_confirmed,
+    )
     anatomical_scale_converged = spread is None or spread <= gates.max_segment_spread_ratio
     kinematics_scale_ok = spread is None or spread <= gates.max_kinematics_segment_spread_ratio
 
@@ -331,6 +342,8 @@ def _quality_block(
         kinematics_failures.append("pose_validity_below_kinematics_threshold")
     if not contact_interval_detected:
         kinematics_failures.append("no_contact_interval")
+    if not takeoff_anchor_review_passed:
+        kinematics_failures.append("takeoff_anchor_review_failed")
     if not kinematics_scale_ok:
         kinematics_failures.append("anatomical_segment_spread_high")
 
@@ -340,6 +353,7 @@ def _quality_block(
             round(float(windowed_pose_pct), 2) if windowed_pose_pct is not None else None
         ),
         "contact_interval_detected": bool(contact_interval_detected),
+        "stationary_camera_confirmed": bool(stationary_camera_confirmed),
         "takeoff_anchor_review_passed": bool(takeoff_anchor_review_passed),
         "anatomical_scale_converged": bool(anatomical_scale_converged),
         "segment_spread_ratio": round(spread, 3) if spread is not None else None,
@@ -359,14 +373,16 @@ def _validate_takeoff_anchor(
     peak_com_frame: int,
     com_vel: np.ndarray,
     fps: float,
+    min_launch_vertical_mps: float = MIN_TAKEOFF_LAUNCH_VERTICAL_MPS,
 ) -> bool:
     """Return True when candidate_frame is a plausible toe-off, not an approach stride.
 
     Two physics-based checks:
 
-    (a) Upward launch condition: CoM vertical velocity must be positive at the
-        candidate frame and peak CoM must come after it.  An approach-stride
-        contact ends before the athlete is airborne upward.
+    (a) Upward launch condition: CoM vertical velocity must meet the minimum
+        launch threshold at the candidate frame and peak CoM must come after it.
+        A weak approach-stride contact can have slightly positive vertical
+        velocity, but it is not a plausible high-jump toe-off.
 
     (b) Flight-time plausibility: from projectile physics, the elapsed time from
         toe-off to peak CoM is at most t_apex = v_y / g (time to apex).  With a
@@ -377,19 +393,19 @@ def _validate_takeoff_anchor(
         rather than the final ground contact.  The margin accounts for noise in
         the velocity estimate.
 
-    Physiological floor on v_y for the lead calculation: 2.0 m/s.  For
-    sub-threshold v_y (noisy near-zero) the check correctly rejects the frame
-    via condition (a).
+    Minimum launch v_y: 2.0 m/s by default. This is deliberately conservative
+    relative to the current 3-4.5 m/s takeoff expectation and rejects noisy
+    near-zero approach-stride contacts close to apex.
     """
     g = 9.81
     if candidate_frame >= len(com_vel):
         return False
     vy = float(com_vel[candidate_frame, 1])
-    # (a) upward at toe-off and peak is later
-    if vy <= 0.0 or peak_com_frame <= candidate_frame:
+    # (a) strong upward launch at toe-off and peak is later
+    if vy < min_launch_vertical_mps or peak_com_frame <= candidate_frame:
         return False
-    # (b) flight-time lead: use physiological floor so noise cannot shrink the window
-    vy_for_lead = min(max(vy, 2.0), 5.5)
+    # (b) flight-time lead: cap outliers so noise cannot enlarge the window.
+    vy_for_lead = min(vy, 5.5)
     t_apex_s = vy_for_lead / g
     max_lead_frames = int(np.ceil(2.0 * t_apex_s * fps))
     return (peak_com_frame - candidate_frame) <= max_lead_frames
@@ -617,6 +633,7 @@ def generate_report(
     windowed_pose_validity_pct_value: float | None = None,
     quality_gates: QualityGateConfig = DEFAULT_QUALITY_GATES,
     capture_mode: str = "handheld",
+    stationary_camera_confirmed: bool = False,
 ) -> dict:
     """Generate a summary report of the jump analysis."""
     mass = sample.subject.body_mass_kg
@@ -676,6 +693,7 @@ def generate_report(
         takeoff_horizontal_mps=takeoff_horiz,
         takeoff_angle_deg=takeoff_angle,
         capture_mode=capture_mode,
+        stationary_camera_confirmed=stationary_camera_confirmed,
         takeoff_anchor_review_passed=takeoff_anchor_review_passed,
         gates=quality_gates,
     )
@@ -762,6 +780,7 @@ def analyze_video(
     scene_max_detection_width: int = 640,
     bar_height_m: float | None = None,
     capture_mode: str = "handheld",
+    stationary_camera_confirmed: bool = False,
     use_roi_crop: bool = False,
 ) -> dict:
     """Run the full analysis pipeline on a single video.
@@ -775,6 +794,10 @@ def analyze_video(
     Phase 9a multi-segment per-frame estimator (much more accurate).
     """
     logger.info(f"=== Analyzing: {video_path.name} ===")
+    if stationary_camera_confirmed and capture_mode != "stationary":
+        raise ValueError(
+            "stationary camera confirmation requires capture_mode='stationary'"
+        )
 
     # 1. Pose estimation (2D normalised + 3D world)
     landmarks_2d, landmarks_3d_world, fps, vid_w, vid_h = extract_poses(
@@ -867,7 +890,6 @@ def analyze_video(
         )
         calibration_info = {
             "method": "anatomical",
-            "capture_mode": capture_mode,
             "anchor_coverage_pct": 0.0,
             "anchor_valid_counts_histogram": {"0": 0, "1": 0, "2": 0, "3": 0, "4": 0},
             "anchor_four_point_valid_pct": 0.0,
@@ -882,9 +904,15 @@ def analyze_video(
             "egomotion_decision_reason": "unavailable",
             "scale_info": scale_info,
         }
-        # Record the horizontal source explicitly when stationary camera is asserted
-        if capture_mode == "stationary":
-            calibration_info["scene_fixed_horizontal_source"] = "stationary_camera"
+    calibration_info["capture_mode"] = capture_mode
+    calibration_info["stationary_camera_confirmed"] = bool(stationary_camera_confirmed)
+    calibration_source = _calibration_source(
+        calibration_info,
+        capture_mode,
+        stationary_camera_confirmed=stationary_camera_confirmed,
+    )
+    if calibration_source != "none":
+        calibration_info["scene_fixed_horizontal_source"] = calibration_source
     logger.info(
         f"  Scale calibration applied: athlete height = {height_m:.2f}m, "
         f"CoM Y range = {landmarks_3d[:, :, 1].min():.2f}–"
@@ -961,6 +989,7 @@ def analyze_video(
         pose_validity_pct_value=pose_pct,
         windowed_pose_validity_pct_value=windowed_pose_pct,
         capture_mode=capture_mode,
+        stationary_camera_confirmed=stationary_camera_confirmed,
     )
 
     # 6. Add session metadata
@@ -969,14 +998,50 @@ def analyze_video(
         report["session_date"] = session_date
     report["session_folder"] = video_path.parent.name
 
-    # 7. Cache the sample for personal-data fine-tuning, if requested
+    # 7. Cache admitted samples for personal-data fine-tuning, if requested
     if samples_out_dir is not None:
-        samples_out_dir.mkdir(parents=True, exist_ok=True)
-        sample_path = samples_out_dir / f"{video_path.stem}.npz"
-        sample.save_npz(sample_path)
-        report["sample_npz"] = str(sample_path)
+        _cache_admitted_sample(sample, report, samples_out_dir)
 
     return report
+
+
+def _cache_admitted_sample(
+    sample: BiomechanicalSample,
+    report: dict,
+    samples_out_dir: Path,
+) -> Path | None:
+    """Cache a sample only when its report passed every training-grade gate."""
+    admitted = report.get("quality", {}).get("training_grade") is True
+    cache_info = {
+        "requested": True,
+        "admitted": admitted,
+        "saved": False,
+        "decision_reason": "training_grade_required",
+    }
+    report["sample_cache"] = cache_info
+    sample_path: Path | None = None
+    if admitted:
+        samples_out_dir.mkdir(parents=True, exist_ok=True)
+        sample_path = samples_out_dir / f"{sample.trial_id}.npz"
+        sample.save_npz(sample_path)
+        report["sample_npz"] = str(sample_path)
+        cache_info["saved"] = True
+        cache_info["decision_reason"] = "training_grade_passed"
+
+    manifest_path = record_admission_decision(
+        samples_out_dir,
+        trial_id=sample.trial_id,
+        admitted=admitted,
+        saved=cache_info["saved"],
+        stationary_camera_confirmed=bool(
+            report.get("quality", {}).get("stationary_camera_confirmed", False)
+        ),
+        training_grade_failures=list(
+            report.get("quality", {}).get("training_grade_failures", [])
+        ),
+    )
+    cache_info["manifest"] = str(manifest_path)
+    return sample_path
 
 
 def main():
@@ -1019,7 +1084,7 @@ def main():
     parser.add_argument(
         "--save-samples", type=str, default=None,
         nargs="?", const="data/results/samples",
-        help="Cache extracted BiomechanicalSamples as .npz under the given "
+        help="Cache training-grade BiomechanicalSamples as .npz under the given "
              "directory (defaults to data/results/samples when flag is bare). "
              "Required input for scripts/finetune_personal.py.",
     )
@@ -1043,9 +1108,16 @@ def main():
     parser.add_argument(
         "--capture-mode", choices=("handheld", "stationary"), default="handheld",
         help=(
-            "Asserted capture mode. 'stationary' credits the fixed camera as a "
-            "scene-fixed horizontal source (no_scene_fixed_horizontal_source gate "
-            "is lifted). Must be asserted by the operator — never inferred."
+            "Capture workflow. Use 'stationary' for fixed-camera footage, then "
+            "also pass --stationary-camera-confirmed after visual review to credit "
+            "the camera as a scene-fixed horizontal source."
+        ),
+    )
+    parser.add_argument(
+        "--stationary-camera-confirmed", action="store_true",
+        help=(
+            "Confirm operator review found no pan, tilt, zoom, or camera movement. "
+            "Only valid with --capture-mode stationary; required for training admission."
         ),
     )
     parser.add_argument(
@@ -1058,6 +1130,8 @@ def main():
         ),
     )
     args = parser.parse_args()
+    if args.stationary_camera_confirmed and args.capture_mode != "stationary":
+        parser.error("--stationary-camera-confirmed requires --capture-mode stationary")
 
     input_path = Path(args.input)
     model_path = Path(args.model)
@@ -1088,6 +1162,7 @@ def main():
                 scene_max_detection_width=args.scene_max_detection_width,
                 bar_height_m=args.bar_height,
                 capture_mode=args.capture_mode,
+                stationary_camera_confirmed=args.stationary_camera_confirmed,
                 use_roi_crop=args.roi_crop == "on",
             )
             all_reports.append(report)
