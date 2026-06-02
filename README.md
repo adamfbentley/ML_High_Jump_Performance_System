@@ -24,12 +24,12 @@ This is an active research codebase, not a polished coaching product. The core
 pipeline pieces are implemented and covered by tests, but the project is still
 in the validation stage.
 
-- 227 local tests currently pass across data loading, kinematics, pose
+- 268 local tests currently pass across data loading, kinematics, pose
   calibration, PINN physics, optimisation, and research-memory tooling.
 - The private athlete videos are not included in the public repository.
-- The main scientific blocker is measurement validity from panned single-camera
-  footage: horizontal velocity and takeoff angle are not treated as
-  training-grade until scene calibration passes stricter checks.
+- The historical panned single-camera corpus is not suitable for training-grade
+  translational metrics. The next validation step uses stationary footage so
+  horizontal velocity and takeoff angle can be checked before personalisation.
 - Optimisation outputs are treated as research probes, not coaching advice,
   until the video-derived measurements pass those quality gates.
 
@@ -37,7 +37,7 @@ in the validation stage.
 
 - Build a reliable end-to-end pipeline from high-jump video to takeoff, flight,
   and bar-clearance metrics.
-- Validate which measurements can be trusted from single-camera footage.
+- Validate stationary single-camera measurements before personal fine-tuning.
 - Train and benchmark PINN dynamics models on public biomechanics data before
   personalising them to Imogen's stationary footage.
 - Use the optimiser as a research tool once the video-derived measurements pass

@@ -38,7 +38,7 @@ scripts/
   download_datasets.py
   render_pose_overlay.py
 
-tests/                  227 tests covering data, kinematics, pose calibration,
+tests/                  268 tests covering data, kinematics, pose calibration,
                         PINN physics, optimisation, and tooling
 tools/memory/           Local RAG build/query scripts for agent context
 memory/                 Tracked notes/plans/experiments plus ignored vector index
@@ -69,12 +69,26 @@ services_scaffold/      Parked deployment scaffolding, not part of research pipe
 `src/pose_estimation/` converts video into calibrated landmark trajectories.
 
 - `estimators/mediapipe_estimator.py`: MediaPipe BlazePose wrapper producing
-  2D normalised landmarks and MediaPipe world landmarks.
+  2D normalised landmarks and MediaPipe world landmarks. Supports an opt-in
+  two-pass ROI crop via `process_video(roi_crop=True)`: pass 1 locates the
+  athlete on the full frame; pass 2 re-detects on the cropped region.
+  `remap_normalized_to_full_frame(landmarks_in_crop, bbox_norm)` maps
+  crop-normalised coords back to full-frame normalised coords (pure function,
+  tested independently). The 3D world landmarks need no remap.
 - `scale_calibration.py`: Phase 9a calibration. When measured thigh/shank
   lengths are available, derives a single video-wide metres-per-pixel value
   from the 95th percentile of visible thigh/shank pixel projections, medianed
   across segments. Ground reference is the 5th percentile of visible ankle Y,
   avoiding single-frame outlier contamination.
+- `scene_calibration.py`: Phase 9c Hough-based upright/crossbar detection and
+  per-frame scene homography. Retained as historical panned-footage rescue
+  infrastructure; the automatic detector is unreliable on those clips.
+- `egomotion.py`: Phase 9c background optical-flow camera-motion compensation.
+  Retained as historical panned-footage rescue infrastructure. It recovers much
+  of the panning component but does not close the translational-scale gap.
+- `gravity_calibration.py`: Phase 9e experimental metres-per-pixel recovery
+  from flight-parabola curvature. It is correct on synthetic projectile data
+  but failed on handheld footage and is not part of the stationary workflow.
 - `skeleton/landmark_postprocessor.py`: gap filling, low-pass filtering, and
   segment-length enforcement.
 - `opensim_ik.py` plus `scripts/opensim_ik_subprocess.py`: optional OpenSim IK
@@ -82,8 +96,10 @@ services_scaffold/      Parked deployment scaffolding, not part of research pipe
 - `dlt_triangulation.py`: available path for true 3D reconstruction from
   synchronised multi-camera footage.
 
-Current limitation: panned single-camera footage is not scene-fixed, so
-horizontal displacement and velocity are not yet training-grade.
+Current policy: panned single-camera footage is not admitted to
+training-grade translational analysis. Stationary footage is required for
+Phase 10 fine-tuning and optimiser claims. The historical panned clips remain
+useful for relative technique review and detector development.
 
 ### Kinematics
 
@@ -98,9 +114,25 @@ horizontal displacement and velocity are not yet training-grade.
 - `flight_analysis.py`: flight parabola metrics, peak CoM height, clearance
   profile, vertical extension timing, and arch transition frame.
 
-Phase 9b changed report takeoff-frame selection in `scripts/analyze_jump_video.py`
-from `argmax(vy)` to the final frame of the final detected ankle-ground contact
-before flight, with `argmax(vy)` only as fallback.
+Phase 9b changed takeoff-frame selection to the final detected ankle-ground
+contact before peak CoM, with `argmax(vy)` only as fallback.
+
+June 2026 additions to `scripts/analyze_jump_video.py`:
+
+- `_validate_takeoff_anchor()`: rejects approach-stride contacts by checking
+  vy > 0 at the candidate frame and that the frame lead does not exceed
+  2·(vy/g)·fps. `select_takeoff_frame_details` returns a 4-tuple including
+  `takeoff_anchor_review_passed`.
+- `pose_validity_pct` tightened to all-8-key-joints (shoulders/hips/knees/ankles,
+  idx 11,12,23,24,25,26,27,28 — matching `PoseFrame.is_valid`).
+- `takeoff_window_pose_validity_pct(landmarks_2d, takeoff_frame, half_window=30)`:
+  gate metric for admission. Measures key-joint coverage in the ±30 frame
+  window around toe-off, excluding early run-up frames where the athlete is too
+  far from camera to detect. Global `pose_validity_pct` retained for diagnostics.
+- `--capture-mode {handheld,stationary}`: asserted flag. When stationary,
+  credits the fixed camera as the scene-fixed horizontal reference; removes the
+  `no_scene_fixed_horizontal_source` training gate.
+- `--roi-crop {on,off}`: opt-in two-pass ROI crop (default off).
 
 ### Data Pipeline
 
@@ -173,15 +205,17 @@ be trusted.
 | --- | --- |
 | `scripts/analyze_jump_video.py` | Video -> calibrated pose -> kinematics -> report; can cache `.npz` samples. |
 | `scripts/pretrain_dynamics_pinn.py` | Train inverse-dynamics PINN on public datasets. |
-| `scripts/finetune_personal.py` | Fine-tune on cached private samples after guardrails pass. Currently blocked. |
+| `scripts/evaluate_dynamics_pinn.py` | Benchmark the pretrained inverse-dynamics PINN against local public force-plate datasets. |
+| `scripts/finetune_personal.py` | Fine-tune on cached private samples after guardrails pass. Keep blocked until admitted-only caching and a larger session are validated. |
 | `scripts/optimize_jump.py` | Generate optimiser/sensitivity outputs from reports. Currently stale pending metric validation. |
 | `scripts/download_datasets.py` | Print manual public-dataset download instructions. |
 | `scripts/render_pose_overlay.py` | Render pose overlays for inspection. |
 
 ## Local Agent Memory
 
-`memory/` and `tools/memory/` implement the lightweight local RAG workflow for
-Claude/Codex collaboration.
+`memory/` holds tracked notes for Claude/Codex collaboration. The optional local
+RAG tooling under `tools/memory/` remains available but is parked while direct
+file reads and `rg` are faster for this small corpus.
 
 - `memory/docs/`: architecture notes, physics notes, equations, decisions, open
   questions.
@@ -201,28 +235,33 @@ default in `tools/memory/config.yaml`.
 
 ## Current Phase
 
-Phase 9a and 9b are implemented and tested:
+Phases 9a-9e established the video-validation boundary:
 
-- Phase 9a: multi-segment scale calibration plus robust ground reference.
+- Phase 9a: multi-segment anatomical scale plus robust ground reference.
 - Phase 9b: contact-anchored takeoff-frame selection.
-- Bar-height parsing fixed for numeric extensions such as `.mp4`.
-- Full private reprocess completed: 45/45 reports and 45/45 cached samples.
-- Full local suite: 227 passing.
+- Phase 9c: scene homography, egomotion, and hand-label truth evaluation.
+- Phase 9e: historical experimental gravity-mpp scale recovery.
+- Full historical private reprocess completed: 45/45 reports and cached samples.
 
-Phase 10 personal fine-tuning is blocked. Aggregate reprocess metrics are not
-training-grade:
+June 2026 — stationary-footage admission tooling shipped and validated:
 
-```text
-Peak CoM median:            1.67 m   (9/45 in 2.0-2.7 m)
-Takeoff vertical velocity:  3.16 m/s (18/45 in 3.0-4.5 m/s)
-Takeoff angle:              66.6 deg (3/45 in 38-48 deg)
-Takeoff horizontal speed:   1.08 m/s (2/45 in 2.5-5.5 m/s)
-```
+- `--capture-mode stationary`, takeoff-anchor review, ROI crop, stricter
+  key-joint pose metric, and windowed pose-validity gate all added.
+- Stationary pilot: **2/3 newer clips pass the implemented report gates**
+  (training_grade True).
+  Takeoff angles 41–43°, vh 3.57–3.60 m/s, window pose validity 70–73 %.
+- Non-PINN test suite: **263 passing**.
 
-The main current blocker is horizontal velocity from panned single-camera
-footage. The next architecture-level fix should recover scene-fixed horizontal
-motion with a physical reference or homography, or use two-camera DLT for future
-data capture.
+Phase 10 personal fine-tuning remains blocked. Before running
+`finetune_personal.py`, add admitted-only sample caching, require explicit
+fixed-camera confirmation, tighten the takeoff-anchor launch threshold, and
+collect a larger dedicated 60 fps session (8–12 attempts). Do not refresh
+optimiser claims until the fine-tuned model is validated on a held-out subset.
+
+The public-data PINN workstream is independent: `scripts/evaluate_dynamics_pinn.py`
+benchmarks the existing checkpoint. AddBiomechanics remains the next high-quality
+GRF dataset to add before a publication-grade retrain with a formal held-out
+subject split.
 
 ## Tests
 
@@ -232,9 +271,11 @@ Run the non-PINN suite with:
 .venv/Scripts/python.exe -m pytest tests/ --ignore=tests/test_pinn -q
 ```
 
-Current result: 190 passing. Test coverage includes data pipeline roundtrips,
-scale calibration, kinematics, optimiser behavior, pose skeleton utilities,
-landmark post-processing, parsers, and physics-law checks.
+Current result: 263 passing (non-PINN). Test coverage includes data pipeline
+roundtrips, scale calibration, kinematics, optimiser behaviour, pose skeleton
+utilities, landmark post-processing, parsers, physics-law checks, bbox remap
+round-trips, takeoff-anchor validation, windowed pose-validity logic, and
+stationary-camera admission gates.
 
 ## Private Data
 

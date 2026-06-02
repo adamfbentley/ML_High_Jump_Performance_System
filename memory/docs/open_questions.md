@@ -1,6 +1,6 @@
 # Open Questions
 
-Updated 2026-05-05 after the stationary-footage decision.
+Updated 2026-06-03 after the stationary admission-tooling audit.
 
 ## Closed
 
@@ -39,13 +39,18 @@ Updated 2026-05-05 after the stationary-footage decision.
 
 - Should the peak-CoM target range be revised after reviewing bar-relative
   CoM results with the BMS PhD student?
-- What stationary capture protocol gives the best accuracy/time trade-off
-  for Imogen: one side/oblique tripod camera, two-camera DLT, or a staged
-  progression from one fixed camera to two?
-- On the first stationary capture session, does gravity-mpp converge with
-  anatomical mpp to within ≤0.3 m/s? If yes, both are working and Phase 10
-  fine-tuning can proceed. If no, the residual is a real anatomical bias
-  worth diagnosing before fine-tune.
+- Do the available stationary sets' camera placements provide
+  enough approach-direction coverage for training-grade takeoff velocity?
+  Two newer clips pass the implemented report gates, but collect a closer
+  60 fps session before personal fine-tuning.
+- What minimum launch-velocity threshold should `_validate_takeoff_anchor`
+  require? The current positive-only check can accept a weak approach stride
+  close to apex.
+- How should admitted-only caching be enforced before personal fine-tuning?
+  The analyser currently saves every processed sample, while the fine-tune
+  loader filters only peak CoM rather than `training_grade`.
+- Require confirmed fixed-camera capture in the local manifest, the report, or
+  both before emitting a `stationary_camera` horizontal source?
 - Is one tripod side-view sufficient for the run-up direction velocity, or
   do we need an end-of-runway camera to capture the approach-direction
   component that side-view projects away?

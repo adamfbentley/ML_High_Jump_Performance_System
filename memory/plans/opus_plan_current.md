@@ -1,5 +1,12 @@
 # Phase 9d Plan — Apparatus-Anchored Mpp At Takeoff Zone
 
+> **Historical plan, superseded 2026-05-05.** Gravity-mpp was tested first and
+> showed that vertical phone tilt corrupts handheld-flight calibration. The
+> panned-footage rescue path is closed. Follow `memory/docs/decisions_log.md`
+> and `ROADMAP.md`: validate the imported stationary pilot before Phase 10.
+> Gravity-mpp, egomotion, scene homography, and hand-labelled apparatus truth
+> are historical only; do not carry them into stationary admission.
+
 Author: Claude Opus (architecture/physics review). 2026-05-04.
 
 Phase 9c shipped. Hand-label evaluation

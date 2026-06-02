@@ -12,13 +12,13 @@ Research project, not a product. **Scientific correctness beats code elegance.**
 ## Read these before doing anything substantive
 
 1. `.github/copilot-instructions.md` — physics conventions, units, code style, current phase
-2. `ROADMAP.md` — full chronological history, recent commits, deferred follow-ups (Phase 9 audit and the 9a/9b/9c open issues live here)
+2. `ROADMAP.md` — full chronological history, recent commits, and the stationary-validation gate
 3. `ARCHITECTURE.md` — module-by-module system overview
 4. `src/data_pipeline/sample.py` — `BiomechanicalSample` is the canonical cross-module data format; never break its field names
 5. `src/utils/constants.py` — gravity, segment mass fractions
 
-For deeper onboarding, prefer local RAG plus the files above instead of a long
-static onboarding prompt.
+For deeper onboarding, prefer direct file reads and `rg` over a long static
+onboarding prompt. The optional local RAG tooling is parked for now.
 
 ## Hard rules
 
@@ -33,60 +33,67 @@ static onboarding prompt.
 ## Quick commands
 
 ```bash
-# Run the full non-PINN test suite (currently 214 passing)
+# Run the full test suite (currently 263 passing non-PINN)
 .venv/Scripts/python.exe -m pytest tests/ --ignore=tests/test_pinn -q
 
-# Build/query local agent memory
-.venv/Scripts/python.exe tools/memory/build_index.py
-.venv/Scripts/python.exe tools/memory/query_index.py "takeoff angle horizontal velocity"
+# Full suite including PINN
+.venv/Scripts/python.exe -m pytest tests/ -q
 
-# Re-process Imogen's videos with sample caching (~35 min for 45 videos)
-.venv/Scripts/python.exe scripts/analyze_jump_video.py "data/High Jump Videos" --save-samples data/results/samples --thigh 0.43 --shank 0.47
+# Search agent memory directly
+rg -n "stationary|stationary_camera|Phase 10" memory ROADMAP.md
+
+# Production stationary-footage run (use for any new fixed-camera session)
+.venv/Scripts/python.exe scripts/analyze_jump_video.py "<stationary-dir>" \
+    --thigh 0.43 --shank 0.47 \
+    --capture-mode stationary \
+    --roi-crop on \
+    --save-samples <ignored-samples-dir>
 
 # Dry-run personal fine-tuning (loads cached samples, applies Phase 9a guardrail)
 .venv/Scripts/python.exe scripts/finetune_personal.py --dry-run
 
 # Smoke-test on a single video
-.venv/Scripts/python.exe scripts/analyze_jump_video.py "data/High Jump Videos/14_02_26/14_02_26_one_1.79.mp4"
+.venv/Scripts/python.exe scripts/analyze_jump_video.py "<video-file>"
 ```
 
-## Current phase (May 2026)
+## Current phase (June 2026)
 
-**Phases 9a/9b/9c SHIPPED. Egomotion validated. Phase 10 still gated on Phase 9d (apparatus-anchored mpp).**
+**Phases 9a-9e SHIPPED. Two newer stationary clips pass the implemented report
+gates. Phase 10 remains blocked pending admitted-only caching, explicit
+fixed-camera confirmation, anchor-threshold tightening, and a larger session.**
 
-- 9a: `src/pose_estimation/scale_calibration.py` derives a single video-wide
-  metres-per-pixel from the 95th percentile of visible thigh/shank projections.
-- 9b: `scripts/analyze_jump_video.py` anchors takeoff to the last ankle-ground
-  contact before peak CoM, with `argmax(vy)` fallback.
-- 9c: `src/pose_estimation/scene_calibration.py` (Hough-line apparatus
-  detector) and `src/pose_estimation/egomotion.py` (background-flow camera
-  motion) shipped with clip-level acceptance gates in
-  `calibrate_landmarks_with_scene`. Both opt-in via `--scene-anchor on` /
-  `--egomotion on`.
-- Validation infrastructure shipped: `scripts/probe_scene_anchors.py`,
-  `scripts/label_scene_anchors.py`, `scripts/evaluate_calibration_truth.py`,
-  `scripts/aggregate_calibration_modes.py`. 72 private videos available
-  (45 originals + 27 unknown-date with bar heights in filenames).
+Key pipeline additions shipped 2026-06-03 (all tested, 263 non-PINN passing):
 
-What hand-label evaluation showed (5 clips, takeoff-window comparison):
+- `--capture-mode stationary` (asserted, never inferred): credits a fixed camera
+  as the scene-fixed horizontal source, removing the `no_scene_fixed_horizontal_source`
+  training gate. Default `handheld` unchanged.
+- `_validate_takeoff_anchor()`: after selecting the last pre-peak ground contact,
+  validates (a) vy > 0 and peak follows, (b) frame lead ≤ 2·t_apex·fps. Rejects
+  approach-stride false detections. `quality.takeoff_anchor_review_passed` published.
+- `--roi-crop on` (off by default): two-pass athlete-crop. Pass 1 locates the
+  athlete on the full frame; pass 2 re-detects on the crop and remaps 2D landmarks
+  back to full-frame normalised coords via `remap_normalized_to_full_frame` (pure,
+  tested). 3D world landmarks are pass-through (no remap needed).
+- `pose_validity_pct` tightened from ≥4-of-33 to all-8-key-joints
+  (shoulders/hips/knees/ankles, matching `PoseFrame.is_valid`).
+- `takeoff_window_pose_validity_pct` (±30 frames around toe-off): the gate
+  metric. The global clip metric is retained for diagnostics but excluded approach
+  frames — where the athlete is far away — drag it below the 60 % threshold even
+  when the critical window is well-covered. The windowed metric correctly reflects
+  what the overlays show.
 
-- Auto-detector (Hough scene_homography): rejected on every clip; the detector
-  locks onto wrong vertical edges (net poles, mat frame). Dead end on existing
-  footage.
-- Egomotion: clearly beats anatomical on takeoff vh (e.g. on the densest-label
-  clip, egomotion 6.33 m/s vs anatomical 3.76 m/s vs truth 7.84 m/s).
-- A residual ~1 m/s underestimate persists *even on the tripod control* where
-  there is no panning to remove. This is not a panning failure; it is a depth
-  / mpp calibration bias. Anatomical mpp (p95 of thigh projection) is
-  systematically biased small at takeoff-zone depth.
-- Smoke claim of "median takeoff vh = 1.08 m/s" was misleading: it used
-  per-frame median (noise-dominated) on anatomical-only output. Truth values
-  at takeoff fall in or near the 2.5-5.5 m/s elite band on most clips.
+Stationary pilot outcome (5 clips, 2 captures, `--capture-mode stationary --roi-crop on`):
 
-Do **not** fine-tune yet. The remaining blocker is the apparatus-anchored mpp
-work in Phase 9d (see `memory/plans/opus_plan_current.md`): use the labelled
-upright separation (4.02 m, IAAF spec) as a third independent scale source at
-the takeoff zone, validate against the tripod clip, then revisit Phase 10.
+- 2/3 newer landscape clips: **training_grade = True**. Takeoff angles 41–43°,
+  vh 3.57–3.60 m/s, window pose validity 70–73 %, contact + anchor review passed.
+- 1/3 newer clip: fails — ankle contact detection failure only; physics in-range.
+- Both earlier controls: not path-forward (approach-stride anchor, high spread).
+
+Do **not** fine-tune or refresh optimiser claims yet. The analyser currently
+caches every processed clip when `--save-samples` is supplied, while the
+fine-tune loader filters only peak CoM. Add admitted-only caching before using
+the two passing clips, then collect a larger stationary session. Follow
+`memory/plans/stationary_footage_validation_plan.md`.
 
 ## Agent memory
 

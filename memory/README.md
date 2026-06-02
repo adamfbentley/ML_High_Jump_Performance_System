@@ -9,7 +9,13 @@ data, source video paths, or per-session private report dumps.
 Generated vector indexes and JSONL logs are local artifacts and are ignored by
 git.
 
-Recommended workflow:
+For the current small corpus, prefer direct reads and `rg`:
+
+```powershell
+rg -n "stationary|stationary_camera|Phase 10" memory ROADMAP.md
+```
+
+The optional local RAG workflow remains available if the corpus grows:
 
 ```powershell
 .venv/Scripts/python.exe tools/memory/build_index.py

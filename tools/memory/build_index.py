@@ -29,6 +29,11 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def stale_chunk_ids(indexed_ids: list[str], current_ids: list[str]) -> list[str]:
+    """Return obsolete chunk IDs left behind by earlier document versions."""
+    return sorted(set(indexed_ids) - set(current_ids))
+
+
 def main() -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -62,6 +67,9 @@ def main() -> None:
     ids = [chunk.chunk_id for chunk in chunks]
     documents = [chunk.document for chunk in chunks]
     metadatas = [chunk_metadata(chunk) for chunk in chunks]
+    obsolete_ids = stale_chunk_ids(collection.get(include=[])["ids"], ids)
+    if obsolete_ids:
+        collection.delete(ids=obsolete_ids)
 
     for start in range(0, len(chunks), args.batch_size):
         end = start + args.batch_size
