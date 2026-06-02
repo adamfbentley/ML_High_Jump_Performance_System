@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
-
+from tools.memory.build_index import stale_chunk_ids
 from tools.memory.rag_core import HashingEmbeddingFunction, chunk_metadata, chunk_text, is_excluded
 
 
@@ -34,3 +34,10 @@ def test_private_data_exclusion_globs():
     assert is_excluded("EMAIL_FOR_ATHLETE_A.md", excludes)
     assert is_excluded("memory/vector_index/chroma/index.bin", excludes)
     assert not is_excluded("src/kinematics/run_up_analysis.py", excludes)
+
+
+def test_stale_chunk_ids_returns_only_obsolete_index_entries():
+    assert stale_chunk_ids(
+        indexed_ids=["unchanged", "old-version", "deleted-file"],
+        current_ids=["unchanged", "new-version"],
+    ) == ["deleted-file", "old-version"]

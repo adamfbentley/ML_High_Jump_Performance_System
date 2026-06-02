@@ -100,3 +100,56 @@
   body visible from final approach through landing, bar height in filename, and
   bar/uprights visible where possible. Two fixed cameras with sync clap/flash
   is the preferred gold-standard progression.
+
+## 2026-06-02
+
+- Stationary footage has been imported locally. The pilot contains three fixed
+  landscape phone clips with approximately uniform 30 fps timing. Session-level
+  metadata remains private and must stay under ignored `data/results/`.
+- The next implementation pass is validation, not another handheld-footage
+  rescue attempt: process the stationary set through the direct anatomical
+  production path, confirm fixed-camera capture, inspect pose coverage and
+  contact detection, and admit clips to Phase 10 only after the stationary
+  production gates pass.
+- Do not fine-tune the personal model or refresh optimiser claims before that
+  validation pass.
+- Execution plan: `memory/plans/stationary_footage_validation_plan.md`.
+- Stationary pilot baseline executed across all three clips. During the first
+  pass, the MediaPipe wrapper was found to collapse undetected frames and trust
+  container-average fps. It now preserves decoded timing with zero-visibility
+  placeholders and derives nominal fps from median decoded timestamp spacing.
+- Accepted reruns preserve 107-144 frames per clip at 30 fps. All three clips
+  complete the anatomical, egomotion-diagnostic, and automatic scene-anchor
+  branches, but only the anatomical production branch is relevant to
+  stationary admission. Report pose validity is 33.09-38.32 %, below both
+  admission gates, and one clip lacks a contact interval.
+- Decision: keep the pilot out of personal fine-tuning. Implement the
+  explicit `stationary_camera` source and inspect pose overlays around plant
+  and takeoff before deciding whether a closer or 60 fps recapture is needed.
+- Correction: gravity-mpp, egomotion, automatic scene homography, and
+  hand-labelled apparatus truth belong to the closed panned-footage rescue
+  workstream. Do not use them as stationary-footage admission gates.
+- Five-clip stationary rerun completed across the available fixed-camera
+  captures. The direct anatomical branch produced private overlays for every
+  clip using decoded source cadence. Whole-clip pose validity remains below
+  the training gate. Four of five clips pass the anatomical segment-spread
+  gate, and the newer trio remains in a coherent takeoff-metric band.
+- Overlay review exposed a second admission requirement: contact detection
+  must be checked for takeoff-window correctness. One earlier control reports
+  a contact interval but selects an approach stride well before toe-off after
+  later tracking drops out. Do not admit stationary clips from a boolean
+  contact flag alone.
+
+## 2026-06-03
+
+- Stationary admission tooling now includes an asserted `stationary_camera`
+  source, two-pass ROI crop, stricter key-joint pose validity, a takeoff-window
+  pose metric, and takeoff-anchor review. Two newer clips pass the implemented
+  report gates.
+- Keep Phase 10 personal fine-tuning blocked. The analyser still caches every
+  processed sample when sample output is requested, while the fine-tune loader
+  filters only peak CoM. Add admitted-only caching before training.
+- Tighten takeoff-anchor review with a minimum launch-velocity threshold. The
+  current positive-only check can accept a weak approach stride close to apex.
+- Require explicit fixed-camera confirmation in durable local metadata before
+  treating the asserted stationary capture mode as admission-grade.

@@ -29,7 +29,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.analyze_jump_video import parse_bar_height  # noqa: E402
+from scripts.analyze_jump_video import resolve_bar_height  # noqa: E402
 
 POINT_NAMES = ("left_base", "right_base", "left_top", "right_top")
 POINT_COLOURS = {
@@ -104,7 +104,8 @@ def _draw_overlay(
     )
     cv2.putText(
         display,
-        "1-4 select | click place/replace | n save partial | s skip empty | u undo | r clear | q quit",
+        "1-4 select | click place/replace | n save partial | "
+        "s skip empty | u undo | r clear | q quit",
         (18, 58),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.48,
@@ -267,6 +268,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Label visible high-jump scene anchors.")
     parser.add_argument("video", type=Path)
     parser.add_argument("--output-dir", type=Path, default=Path("data/results/hand_anchors"))
+    parser.add_argument(
+        "--bar-height",
+        type=float,
+        default=None,
+        help="Bar height in metres. Overrides filename-derived metadata.",
+    )
     parser.add_argument("--frames", type=int, default=25)
     parser.add_argument(
         "--every",
@@ -325,7 +332,7 @@ def main() -> None:
             "label_schema": "scene_anchors_partial_v1",
             "video_path": str(args.video),
             "video_stem": args.video.stem,
-            "bar_height_m": parse_bar_height(args.video.name),
+            "bar_height_m": resolve_bar_height(args.video.name, args.bar_height),
             "n_frames": int(n_frames),
             "point_order": list(POINT_NAMES),
             "complete_label_count": int(complete),

@@ -17,9 +17,10 @@ fallback = argmax(vy), only when no contact interval is detected
 ```
 
 Current caution: takeoff angle is not training-grade until horizontal velocity
-is scene-fixed.
+is scene-fixed. Historical panned footage is retained for relative technique
+analysis only; stationary footage is required for Phase 10 inputs.
 
-Phase 9c scene homography:
+Historical Phase 9c scene homography:
 
 ```text
 upright_separation_m = 4.02
@@ -38,5 +39,34 @@ left_top_px   -> [-upright_separation_m / 2, bar_height_m]
 right_top_px  -> [ upright_separation_m / 2, bar_height_m]
 ```
 
-When a frame has fewer than four reliable apparatus anchors, Phase 9c falls
-back to Phase 9a anatomical scale for that frame.
+This was a panned-footage rescue experiment. It remains implemented but is not
+part of the stationary-camera admission path.
+
+Historical Phase 9e gravity-mpp experiment:
+
+```text
+During true flight:
+acceleration_px_s2 = magnitude(second_derivative(CoM_px, time))
+gravity_mpp = 9.81 / acceleration_px_s2
+
+quality gates:
+downward_acceleration_fraction >= 0.65
+horizontal_acceleration_fraction <= 0.45
+flight_parabola_y_r_squared >= 0.75
+```
+
+`gravity_mpp` is correct on synthetic projectile data but was corrupted by
+vertical camera tilt in handheld footage. It is retained as a historical
+experiment and is not part of the stationary-camera admission path.
+
+Current stationary-camera assumption:
+
+```text
+camera_pan = camera_tilt = camera_zoom = 0 during the attempt
+image_frame_x is scene-fixed
+horizontal_source = stationary_camera
+```
+
+Confirmed fixed-camera clips use the direct Phase 9a anatomical production path.
+This removes camera-motion contamination, not fixed single-camera projection or
+anatomical-scale limitations.
