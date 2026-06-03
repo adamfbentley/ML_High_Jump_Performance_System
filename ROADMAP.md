@@ -350,7 +350,7 @@ After the 9a/9b fixes, **0/45** reports have negative takeoff angles or velociti
 
 ---
 
-## Current State (5 May 2026)
+## Current State (3 June 2026)
 
 | Area | Status |
 |---|---|
@@ -361,21 +361,23 @@ After the 9a/9b fixes, **0/45** reports have negative takeoff angles or velociti
 | GNN skeleton coupling | ✅ Complete |
 | Dataset loaders (CMJ, CoD, DVJ, AddBiomechanics, BioCV, OpenCap) | ✅ Complete |
 | Differentiable optimiser + sensitivity analysis | ✅ Complete and tested |
-| Video analysis end-to-end pipeline | ✅ Complete (takeoff-detection bug fixed Phase 9) |
+| Video analysis end-to-end pipeline | ✅ Complete — stationary-footage tooling added June 2026 |
 | Athlete priority metrics (Athlete A alignment) | ✅ Implemented |
-| Test suite | ✅ 222 tests passing (`tests/test_pinn` ignored) |
+| Test suite | ✅ 272 non-PINN / 277 total tests passing |
 | Public datasets downloaded (Zenodo CMJ, CoD, DVJ) | ✅ Done |
 | PINN pre-training run (3000 epochs) | ✅ Done — `final_model.pth` saved |
-| Athlete A's 45 jump videos processed | ✅ Re-processed Phase 9a/9b with 45 cached samples |
-| Takeoff detection (frame selection) | ✅ Fixed — contact-anchored takeoff with velocity fallback |
-| Takeoff detection (noise robustness) | ✅ Phase 9b implemented and tested |
-| Single-camera scale calibration on panned footage | ❌ Closed — Phases 9c, 9d, 9e all attempted on existing footage. Egomotion narrows but does not close the gap; auto-detector dead; gravity-mpp fails because vertical camera tilt during flight corrupts the parabola fit. Conclusion: panned footage cannot be rescued to training-grade. |
-| Hand-label evaluation infrastructure | ✅ Phase 9c — label tool with partial-label UX, truth evaluator with takeoff-window comparison and gravity-mpp comparison mode, 5 bar-tagged clips labelled |
-| Gravity-mpp validation module | ✅ Phase 9e — `src/pose_estimation/gravity_calibration.py` implemented as validation-only; physics-correct on synthetic data; failed on Athlete A's panned footage as predicted |
-| Stationary-footage capture policy | 🟦 Locked 2026-05-05 — required for any training-grade physics, Phase 10 fine-tuning, and optimiser claims |
+| Athlete A's 45 panned videos processed | ✅ Re-processed Phase 9a/9b with 45 cached samples |
+| Takeoff detection (frame selection) | ✅ Contact-anchored with anchor-review validation |
+| Takeoff anchor correctness check | ✅ `_validate_takeoff_anchor` — rejects approach-stride false detections |
+| Single-camera scale calibration on panned footage | ❌ Closed — gravity-mpp and egomotion cannot reach training-grade on handheld clips |
+| Hand-label evaluation infrastructure | ✅ Phase 9c — truth evaluator, label tool, 5 clips labelled |
+| Gravity-mpp validation module | ✅ Phase 9e — validation-only; failed on handheld as predicted |
+| Stationary-footage admission tooling | ✅ June 2026 — explicit fixed-camera confirmation, `--roi-crop on`, windowed pose-validity gate, strengthened anchor review, admitted-only cache, and local manifest all shipped and tested |
+| Stationary capture policy | ✅ Locked — required for training-grade physics, Phase 10, and optimiser claims |
+| Stationary pilot validation | 🟦 Promising — 2/3 newer clips pass implemented report gates; larger 60 fps session still required |
 | AddBiomechanics dataset downloaded | ⬜ Pending (highest-quality GRF pre-training data) |
-| Personal data fine-tuning loop | ⬜ Pending — now gated on stationary footage collection, not further calibration work |
-| Athlete A stationary capture session | ⬜ Pending — minimum viable: tripod/fixed phone, no pan/zoom, 60 fps, landscape, full body visible through landing, bar/uprights in frame, bar height in filename |
+| Personal data fine-tuning loop | ⬜ Blocked — collect a larger stationary session and reserve a held-out subset |
+| Optimiser outputs | ⬜ Stale — do not refresh until larger stationary session validated |
 
 ---
 
@@ -467,9 +469,9 @@ footage because phone operators tilt vertically to follow the athlete over
 the bar, and the residual tilt left after egomotion stabilisation is on the
 same order of magnitude as the real gravity signal. The parabola fit absorbs
 the tilt as spurious gravity, giving an mpp that is wrong by the same factor
-egomotion attempted to remove. Path A in the brainstorm (`memory/docs/decisions_log.md`
-2026-05-05 entry summarises) holds on truly stationary footage but is not a
-rescue path for handheld panning.
+egomotion attempted to remove. Reusing the method on stationary footage was
+considered at the time, but it is not part of the current fixed-camera
+workflow.
 
 ### Conclusion — locked policy: stationary footage required
 
@@ -481,15 +483,98 @@ for the Phase 10 fine-tune. Going forward:
   Phase 10 fine-tuning, and optimiser claims.
 - Handheld/panned footage is retained for exploratory analysis, detector
   development, and relative technique review only.
-- The validation-only gravity-mpp path remains in the codebase for use on
-  future stationary clips; it should converge with anatomical mpp on
-  tripod footage and act as a built-in scale sanity check.
+- The gravity-mpp, egomotion, scene-homography, and hand-label paths remain in
+  the codebase as a closed record of the handheld-footage rescue workstream.
+  They are not stationary-footage admission requirements.
 
 ---
 
 ## Upcoming Work
 
 ### Athlete A Stationary Capture Session
+
+**Update 2 June 2026:** stationary footage has been imported locally and five
+fixed-camera clips across two captures have run through the direct production
+anatomical path. The MediaPipe wrapper was repaired during the first pass:
+undetected poses now retain their source frames as zero-visibility
+placeholders, and nominal fps comes from median decoded timestamp spacing
+rather than container-average fps. Private pose overlays now exist for all
+five clips and use the same decoded cadence.
+
+The rerun preserves 103-144 frames per clip at 30 fps. The newer trio remains
+coherent: anatomical takeoff horizontal velocity is 3.35-4.15 m/s and segment
+spread is within guardrails. No clip is admitted yet: whole-clip pose validity
+is below the training gate (33-52 % with old metric), one earlier control
+exceeds the segment-spread gate, and overlay review found one earlier control
+selecting an approach stride well before toe-off after later tracking drops out.
+
+**Update 3 June 2026 — admission tooling shipped:**
+
+Four initial gaps closed; the subsequent cache-boundary hardening brings the
+suite to 272/272 non-PINN tests passing.
+
+1. **`--capture-mode stationary --stationary-camera-confirmed`**
+   (scripts/analyze_jump_video.py): an explicit operator review that the camera
+   did not pan, tilt, zoom, or move removes the
+   `no_scene_fixed_horizontal_source` training gate. `capture_mode`,
+   `stationary_camera_confirmed`, and
+   `scene_fixed_horizontal_source: "stationary_camera"` are recorded in every
+   report's calibration block. Default handheld behaviour is unchanged.
+
+2. **Takeoff-anchor review** (`_validate_takeoff_anchor`): after selecting the
+   last pre-peak ankle-ground contact, the validator checks (a) vy >= 2.0 m/s
+   at the candidate frame and peak CoM follows, and (b) the frame lead does not
+   exceed 2 × t_apex × fps (projectile flight-time physics, 2× margin).
+   `select_takeoff_frame_details` now returns a 4-tuple including
+   `takeoff_anchor_review_passed`. Argmax fallback always returns False.
+   `report.quality.takeoff_anchor_review_passed` published in every report.
+   `"takeoff_anchor_review_failed"` rejects both kinematics grade and training
+   grade when False.
+
+3. **`--roi-crop on`** (MediaPipeEstimator / analyze_jump_video.py): two-pass
+   athlete-crop strategy. Pass 1 detects on the full frame to locate the athlete;
+   pass 2 re-detects on the cropped region and remaps 2D landmarks back to
+   full-frame normalised coordinates via `remap_normalized_to_full_frame` (pure
+   function, tested independently). The 3D world landmarks are passed through
+   without remapping. Preserves all existing invariants: one frame per decoded
+   source, zero-visibility placeholders, fps from timestamp cadence.
+
+4. **Stricter `pose_validity_pct`**: replaced >=4-of-33 weak proxy with all-8
+   key joints (shoulders/hips/knees/ankles, idx 11,12,23,24,25,26,27,28),
+   consistent with `PoseFrame.is_valid`. 60 % admission threshold unchanged.
+   This is a deliberate tightening — the old criterion passed frames where only
+   non-structural landmarks were visible.
+
+**Rerun 2 results (2026-06-03) — `--capture-mode stationary --roi-crop on`:**
+
+Reports saved to an ignored local results directory.
+0/5 clips pass all gates. Gate-by-gate aggregate:
+
+- `stationary_camera` source: **5/5 pass** — Change 1 working correctly.
+- `segment_spread ≤ 1.35`: **4/5 pass** — one control fails (spread 2.1).
+- `vh in [2.5, 5.5] m/s`: **5/5 pass** — newer trio 3.57–4.09 m/s.
+- `angle in [38, 55] °`: **4/5 pass** — one control fails at 13.1° (approach-stride
+  anchor confirmed by `takeoff_anchor_review_passed = False`).
+- `contact + anchor review`: **2/5 pass** — newer clips 1 & 2 pass both;
+  one newer clip and both controls fail (no contact or approach stride selected).
+- `pose_validity ≥ 60 %` (stricter all-8-key-joints metric): **0/5 pass**
+  — newer trio 27–41 %, controls 35–45 %. Sole remaining blocker for newer trio.
+
+ROI crop moved the needle on newer clip 2 (38 % → 41 %) but not the others.
+The crop region computed from pass-1 landmarks does not extend high enough to
+capture shoulders during flight at this camera distance (athlete ≈ 10–16 % of
+frame height). The 20 % relative margin is insufficient when the athlete rises
+8–10 % of frame height above the approach position at takeoff.
+
+**Current blocker:** pose coverage at this camera distance. All physics gates
+pass for the newer trio. Recapture protocol:
+- Move camera closer so athlete ≥ 25 % of frame height.
+- Shoot at 60 fps (improves contact detection margin).
+- Keep landscape orientation; full approach through landing in frame.
+- Bar and uprights visible where possible.
+- `--capture-mode stationary --stationary-camera-confirmed --thigh 0.45
+  --shank 0.45` on production run;
+  `--roi-crop on` optional once athlete fills the frame.
 
 Minimum useful setup:
 
@@ -507,11 +592,27 @@ validation pass.
 
 ### Phase 10 — Personal Data Fine-Tuning
 
-- Gated on receipt of at least one usable stationary session from Athlete A.
-- `scripts/finetune_personal.py` exists; do not run until the new footage
-  passes the truth-evaluator gates: gravity-mpp should converge with
-  anatomical mpp to within ≤0.3 m/s, takeoff vh should land in the
-  2.5-5.5 m/s elite band.
+**Status: blocked pending a larger session and held-out split.**
+
+Phase 10 prep hardening is complete. The analyser caches only `training_grade`
+clips, records every admission decision in ignored local
+`_admission_manifest.json`, and the fine-tune loader refuses legacy mixed
+caches. Explicit fixed-camera confirmation and the stricter takeoff-anchor
+threshold are also enforced. Collect a dedicated 60 fps session (athlete ≥ 25 %
+of frame height) of 8-12 attempts at a range of bar heights before running a
+real fine-tune.
+
+Do not refresh optimiser claims until the fine-tuned model is validated on a
+held-out subset of the larger session.
+
+**Raw anthropometry cross-check (2026-06-03):** the pre-calibration stationary
+diagnostic was run across all five local clips with and without ROI crop, using
+total leg length only as the scale anchor. Aggregate held-out lower-limb
+proportions are credible: raw MediaPipe-world shank and thigh estimates are
+within 2 % of taped measurements, while 2D projected estimates are within 8 %.
+Arm length remains underestimated by roughly 15-22 %, so arm landmarks should
+not be used as a calibration anchor yet. This supports the lower-limb
+anatomical branch but does not validate absolute scene scale or run-up velocity.
 
 ### Phase 11 — Validation and Paper
 

@@ -2,7 +2,8 @@
 
 Usage:
     python scripts/render_pose_overlay.py "data/High Jump Videos/09_02_26/09_02_26_one.mp4"
-    python scripts/render_pose_overlay.py "data/High Jump Videos" --output-dir data/results/pose_overlays
+    python scripts/render_pose_overlay.py "data/High Jump Videos" \
+        --output-dir data/results/pose_overlays
 """
 
 from __future__ import annotations
@@ -15,7 +16,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.visualization.pose_overlay import render_mediapipe_pose_overlay
 
-
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 
 
@@ -23,7 +23,11 @@ def collect_videos(path: Path) -> list[Path]:
     if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS:
         return [path]
     if path.is_dir():
-        return sorted(p for p in path.rglob("*") if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS)
+        return sorted(
+            p
+            for p in path.rglob("*")
+            if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS
+        )
     return []
 
 

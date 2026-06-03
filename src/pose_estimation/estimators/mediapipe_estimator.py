@@ -6,16 +6,20 @@ Google's MediaPipe BlazePose pipeline.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
+
+from src.utils.constants import N_BLAZEPOSE_LANDMARKS
 
 try:
     import mediapipe as mp
 except ImportError:
     mp = None
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -25,7 +29,7 @@ class PoseFrame:
     frame_index: int
     timestamp_ms: float
     landmarks_2d: np.ndarray  # (33, 3) — x, y, visibility
-    landmarks_3d: Optional[np.ndarray] = None  # (33, 4) — x, y, z, visibility
+    landmarks_3d: np.ndarray | None = None  # (33, 4) — x, y, z, visibility
 
     @property
     def is_valid(self) -> bool:
@@ -50,6 +54,118 @@ class PoseSequence:
     def to_numpy(self) -> np.ndarray:
         """Stack all 2D landmarks into (T, 33, 3) array."""
         return np.stack([f.landmarks_2d for f in self.frames])
+
+
+def _nominal_fps_from_timestamps(
+    timestamps_ms: list[float],
+    fallback_fps: float,
+) -> float:
+    """Estimate nominal FPS from decoded frame timestamps.
+
+    iPhone MOV containers can report an average frame rate that differs from
+    the decoded cadence. Kinematic derivatives need the cadence of the decoded
+    frames, so prefer the median positive timestamp interval.
+    """
+    if len(timestamps_ms) >= 2:
+        deltas_ms = np.diff(np.asarray(timestamps_ms, dtype=np.float64))
+        valid = deltas_ms[np.isfinite(deltas_ms) & (deltas_ms > 1e-3)]
+        if valid.size:
+            median_delta_ms = float(np.median(valid))
+            fps = 1000.0 / median_delta_ms
+            if np.isfinite(fps) and fps > 0:
+                return fps
+    return float(fallback_fps)
+
+
+def _missing_pose_frame(frame_index: int, timestamp_ms: float) -> PoseFrame:
+    """Represent an undetected frame without collapsing the video timeline."""
+    return PoseFrame(
+        frame_index=frame_index,
+        timestamp_ms=timestamp_ms,
+        landmarks_2d=np.zeros((N_BLAZEPOSE_LANDMARKS, 3), dtype=np.float32),
+        landmarks_3d=np.zeros((N_BLAZEPOSE_LANDMARKS, 4), dtype=np.float32),
+    )
+
+
+def remap_normalized_to_full_frame(
+    landmarks_in_crop: np.ndarray,
+    bbox_norm: tuple[float, float, float, float],
+) -> np.ndarray:
+    """Remap 2D landmarks from crop-normalised space to full-frame normalised coords.
+
+    Pure function — tested independently of MediaPipe.
+
+    landmarks_in_crop: (33, 3) — x, y normalised in [0, 1] of the crop extent,
+        plus visibility channel (unchanged).
+    bbox_norm: (x1, y1, x2, y2) — crop boundaries as fractions of the original frame.
+    Returns: (33, 3) with x, y normalised to the original full-frame [0, 1].
+
+    Correctness note: downstream scale_calibration reads pixel projections via
+    image_width / image_height, so the returned coordinates MUST be in the
+    original full-frame normalised space.
+    """
+    x1, y1, x2, y2 = bbox_norm
+    crop_w = x2 - x1
+    crop_h = y2 - y1
+    result = landmarks_in_crop.copy()
+    result[:, 0] = landmarks_in_crop[:, 0] * crop_w + x1
+    result[:, 1] = landmarks_in_crop[:, 1] * crop_h + y1
+    return result
+
+
+def _bbox_from_landmarks_2d(
+    landmarks_2d: np.ndarray,
+    min_visibility: float = 0.3,
+) -> tuple[float, float, float, float] | None:
+    """Normalised (x1,y1,x2,y2) enclosing all landmarks above min_visibility."""
+    visible = landmarks_2d[landmarks_2d[:, 2] >= min_visibility]
+    if visible.shape[0] == 0:
+        return None
+    return (
+        float(visible[:, 0].min()),
+        float(visible[:, 1].min()),
+        float(visible[:, 0].max()),
+        float(visible[:, 1].max()),
+    )
+
+
+def _aggregate_smoothed_crop(
+    sequence: PoseSequence,
+    margin: float = 0.20,
+    min_visibility: float = 0.3,
+) -> tuple[float, float, float, float] | None:
+    """Union of per-frame landmark bboxes with margin, for two-pass ROI cropping.
+
+    Returns normalised (x1, y1, x2, y2) in [0, 1], or None when no landmarks
+    were detected in any frame of the pass-1 sequence.
+    """
+    all_x: list[float] = []
+    all_y: list[float] = []
+    for frame in sequence.frames:
+        bb = _bbox_from_landmarks_2d(frame.landmarks_2d, min_visibility)
+        if bb is not None:
+            all_x += [bb[0], bb[2]]
+            all_y += [bb[1], bb[3]]
+    if not all_x:
+        return None
+
+    x1, x2 = min(all_x), max(all_x)
+    y1, y2 = min(all_y), max(all_y)
+    w, h = x2 - x1, y2 - y1
+
+    # Apply relative margin; guarantee an absolute minimum half-width of 5 % so
+    # near-degenerate detections (few visible landmarks on a wide-angle clip) still
+    # produce a usable crop region.
+    half_min = 0.05
+    x1 = max(0.0, min(x1 - w * margin, x1 - half_min))
+    x2 = min(1.0, max(x2 + w * margin, x2 + half_min))
+    y1 = max(0.0, min(y1 - h * margin, y1 - half_min))
+    y2 = min(1.0, max(y2 + h * margin, y2 + half_min))
+
+    # Final sanity: reject if still degenerate after clamping to [0,1]
+    if (x2 - x1) < 0.05 or (y2 - y1) < 0.05:
+        return None
+    return x1, y1, x2, y2
 
 
 class MediaPipeEstimator:
@@ -104,16 +220,58 @@ class MediaPipeEstimator:
                     "See: https://ai.google.dev/edge/mediapipe/solutions/vision/pose_landmarker"
                 )
 
-    def process_video(self, video_path: str | Path) -> PoseSequence:
+    def process_video(self, video_path: str | Path, roi_crop: bool = False) -> PoseSequence:
         """Run pose estimation on every frame of a video file.
 
         Uses the MediaPipe Tasks PoseLandmarker API (≥0.10.14).
 
+        When roi_crop=True, a two-pass strategy is used: pass 1 detects on the
+        full frame to locate the athlete, pass 2 re-detects on the cropped and
+        upscaled athlete region and remaps landmarks back to full-frame normalised
+        coordinates. This improves detection when the athlete occupies a small
+        fraction of the frame (e.g. far-back stationary camera).
+
         Args:
             video_path: Path to the video file (mp4, mov, etc.)
+            roi_crop: When True, use the two-pass ROI crop strategy.
 
         Returns:
-            PoseSequence with detected landmarks for each frame.
+            PoseSequence with one frame per decoded source frame. Undetected
+            frames are filled with zero-visibility placeholders. fps is derived
+            from median decoded timestamp spacing (not container average).
+        """
+        if not roi_crop:
+            return self._run_pose_detection(Path(video_path), crop_bbox_norm=None)
+
+        # Two-pass: coarse full-frame pass → stable crop bbox → re-detect on crop
+        pass1 = self._run_pose_detection(Path(video_path), crop_bbox_norm=None)
+        bbox_norm = _aggregate_smoothed_crop(pass1)
+        if bbox_norm is None:
+            logger.warning("ROI crop pass 1 yielded no landmarks; returning full-frame result")
+            return pass1
+        logger.info(
+            "ROI crop: pass-2 bbox (normalised) x=[%.3f,%.3f] y=[%.3f,%.3f]",
+            bbox_norm[0], bbox_norm[2], bbox_norm[1], bbox_norm[3],
+        )
+        return self._run_pose_detection(Path(video_path), crop_bbox_norm=bbox_norm)
+
+    def _run_pose_detection(
+        self,
+        video_path: Path,
+        crop_bbox_norm: tuple[float, float, float, float] | None,
+    ) -> PoseSequence:
+        """Core detection loop for one pass over the video.
+
+        When crop_bbox_norm (x1,y1,x2,y2 normalised) is given, each frame is
+        cropped to that region before pose detection and the resulting 2D
+        landmarks are remapped back to full-frame normalised coordinates via
+        remap_normalized_to_full_frame. The 3D world landmarks (metric,
+        hip-centred) are passed through without remapping.
+
+        Preserves invariants:
+          - One output frame per decoded source frame.
+          - Zero-visibility _missing_pose_frame placeholder for undetected frames.
+          - fps from median decoded timestamp spacing.
         """
         import cv2
         from mediapipe.tasks.python import BaseOptions
@@ -123,13 +281,28 @@ class MediaPipeEstimator:
             RunningMode,
         )
 
-        video_path = Path(video_path)
         if not video_path.exists():
             raise FileNotFoundError(f"Video not found: {video_path}")
 
         cap = cv2.VideoCapture(str(video_path))
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        sequence = PoseSequence(video_path=str(video_path), fps=fps)
+        reported_fps = float(cap.get(cv2.CAP_PROP_FPS))
+        vid_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        vid_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        # Precompute pixel-space crop extents once (stable across all frames)
+        crop_px: tuple[int, int, int, int] | None = None
+        if crop_bbox_norm is not None:
+            x1_n, y1_n, x2_n, y2_n = crop_bbox_norm
+            crop_px = (
+                max(0, int(x1_n * vid_w)),
+                max(0, int(y1_n * vid_h)),
+                min(vid_w, int(x2_n * vid_w)),
+                min(vid_h, int(y2_n * vid_h)),
+            )
+
+        sequence = PoseSequence(video_path=str(video_path), fps=reported_fps)
+        decoded_timestamps_ms: list[float] = []
+        previous_timestamp_ms = -1
 
         options = PoseLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=self._model_path),
@@ -148,28 +321,55 @@ class MediaPipeEstimator:
                 if not ret:
                     break
 
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                mp_image = mp.Image(
-                    image_format=mp.ImageFormat.SRGB, data=rgb,
-                )
-                timestamp_ms = int(frame_idx * 1000 / fps) if fps > 0 else frame_idx
+                decoded_timestamp_ms = float(cap.get(cv2.CAP_PROP_POS_MSEC))
+                if not np.isfinite(decoded_timestamp_ms) or (
+                    frame_idx > 0 and decoded_timestamp_ms <= 0
+                ):
+                    decoded_timestamp_ms = (
+                        frame_idx * 1000.0 / reported_fps
+                        if reported_fps > 0
+                        else float(frame_idx)
+                    )
+                decoded_timestamps_ms.append(decoded_timestamp_ms)
+                timestamp_ms = max(previous_timestamp_ms + 1, int(round(decoded_timestamp_ms)))
+                previous_timestamp_ms = timestamp_ms
 
+                # Crop to athlete ROI when requested
+                frame_input = (
+                    frame
+                    if crop_px is None
+                    else frame[crop_px[1]:crop_px[3], crop_px[0]:crop_px[2]]
+                )
+
+                rgb = cv2.cvtColor(frame_input, cv2.COLOR_BGR2RGB)
+                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
                 result = landmarker.detect_for_video(mp_image, timestamp_ms)
 
                 if result.pose_landmarks and len(result.pose_landmarks) > 0:
-                    # 2D normalized landmarks (x, y in [0,1], visibility)
+                    # 2D normalised landmarks (x, y in [0,1] of input image, visibility)
                     lm = result.pose_landmarks[0]
-                    landmarks_2d = np.array(
-                        [[l.x, l.y, l.visibility] for l in lm],
+                    landmarks_2d_detected = np.array(
+                        [[landmark.x, landmark.y, landmark.visibility] for landmark in lm],
                         dtype=np.float32,
                     )
 
-                    # 3D world landmarks (metres, hip-centred)
+                    # Remap from crop-normalised to full-frame-normalised when cropped
+                    if crop_bbox_norm is not None:
+                        landmarks_2d = remap_normalized_to_full_frame(
+                            landmarks_2d_detected, crop_bbox_norm
+                        )
+                    else:
+                        landmarks_2d = landmarks_2d_detected
+
+                    # 3D world landmarks (metric, hip-centred) — no spatial remap needed
                     landmarks_3d = None
                     if result.pose_world_landmarks and len(result.pose_world_landmarks) > 0:
                         wl = result.pose_world_landmarks[0]
                         landmarks_3d = np.array(
-                            [[l.x, l.y, l.z, l.visibility] for l in wl],
+                            [
+                                [landmark.x, landmark.y, landmark.z, landmark.visibility]
+                                for landmark in wl
+                            ],
                             dtype=np.float32,
                         )
 
@@ -179,9 +379,14 @@ class MediaPipeEstimator:
                         landmarks_2d=landmarks_2d,
                         landmarks_3d=landmarks_3d,
                     )
-                    sequence.frames.append(pose_frame)
-
+                else:
+                    pose_frame = _missing_pose_frame(
+                        frame_index=frame_idx,
+                        timestamp_ms=float(timestamp_ms),
+                    )
+                sequence.frames.append(pose_frame)
                 frame_idx += 1
 
         cap.release()
+        sequence.fps = _nominal_fps_from_timestamps(decoded_timestamps_ms, reported_fps)
         return sequence

@@ -42,8 +42,8 @@ def _extract_poses_with_source_indices(video_path: Path):
 
     Returns ``(landmarks_2d, landmarks_3d_world, fps, width, height, source_indices)``
     where ``source_indices[i]`` is the index of frame ``i`` in the original video
-    file (NOT MediaPipe's output index — they differ when MediaPipe drops
-    frames it couldn't detect a pose in).
+    file. Undetected poses remain represented as zero-visibility placeholders,
+    preserving source-video timing.
     """
     import cv2
 
@@ -241,9 +241,8 @@ def evaluate_label_file(label_path: Path, thigh_m: float, shank_m: float) -> dic
     bar_height = payload.get("bar_height_m") or parse_bar_height(video_path.name)
     if bar_height is None:
         raise ValueError(f"{label_path} needs bar_height_m or a parseable bar height")
-    # Build truth anchors at the source frame indices MediaPipe actually
-    # decoded. MediaPipe drops frames it can't detect a pose in, so its output
-    # index is not the source frame index; we align via source_indices.
+    # Build truth anchors at MediaPipe's source frame indices. Keeping this
+    # alignment explicit preserves compatibility with older cached labels.
     aligned_payload = {**payload, "bar_height_m": bar_height}
     truth_anchors = _labels_to_scene_anchors(aligned_payload, target_indices=source_indices)
     if not np.any(truth_anchors.confidence > 0):
@@ -289,7 +288,12 @@ def evaluate_label_file(label_path: Path, thigh_m: float, shank_m: float) -> dic
         shank_length_m=shank_m,
     )
 
-    motion = estimate_camera_motion(video_path, landmarks_2d, image_width=width, image_height=height)
+    motion = estimate_camera_motion(
+        video_path,
+        landmarks_2d,
+        image_width=width,
+        image_height=height,
+    )
     egomotion, egomotion_info = calibrate_landmarks_with_scene(
         landmarks_2d,
         landmarks_3d_world,

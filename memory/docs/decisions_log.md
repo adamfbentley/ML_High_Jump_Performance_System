@@ -100,3 +100,74 @@
   body visible from final approach through landing, bar height in filename, and
   bar/uprights visible where possible. Two fixed cameras with sync clap/flash
   is the preferred gold-standard progression.
+
+## 2026-06-02
+
+- Stationary footage has been imported locally. The pilot contains three fixed
+  landscape phone clips with approximately uniform 30 fps timing. Session-level
+  metadata remains private and must stay under ignored `data/results/`.
+- The next implementation pass is validation, not another handheld-footage
+  rescue attempt: process the stationary set through the direct anatomical
+  production path, confirm fixed-camera capture, inspect pose coverage and
+  contact detection, and admit clips to Phase 10 only after the stationary
+  production gates pass.
+- Do not fine-tune the personal model or refresh optimiser claims before that
+  validation pass.
+- Execution plan: `memory/plans/stationary_footage_validation_plan.md`.
+- Stationary pilot baseline executed across all three clips. During the first
+  pass, the MediaPipe wrapper was found to collapse undetected frames and trust
+  container-average fps. It now preserves decoded timing with zero-visibility
+  placeholders and derives nominal fps from median decoded timestamp spacing.
+- Accepted reruns preserve 107-144 frames per clip at 30 fps. All three clips
+  complete the anatomical, egomotion-diagnostic, and automatic scene-anchor
+  branches, but only the anatomical production branch is relevant to
+  stationary admission. Report pose validity is 33.09-38.32 %, below both
+  admission gates, and one clip lacks a contact interval.
+- Decision: keep the pilot out of personal fine-tuning. Implement the
+  explicit `stationary_camera` source and inspect pose overlays around plant
+  and takeoff before deciding whether a closer or 60 fps recapture is needed.
+- Correction: gravity-mpp, egomotion, automatic scene homography, and
+  hand-labelled apparatus truth belong to the closed panned-footage rescue
+  workstream. Do not use them as stationary-footage admission gates.
+- Five-clip stationary rerun completed across the available fixed-camera
+  captures. The direct anatomical branch produced private overlays for every
+  clip using decoded source cadence. Whole-clip pose validity remains below
+  the training gate. Four of five clips pass the anatomical segment-spread
+  gate, and the newer trio remains in a coherent takeoff-metric band.
+- Overlay review exposed a second admission requirement: contact detection
+  must be checked for takeoff-window correctness. One earlier control reports
+  a contact interval but selects an approach stride well before toe-off after
+  later tracking drops out. Do not admit stationary clips from a boolean
+  contact flag alone.
+
+## 2026-06-03
+
+- Stationary admission tooling now includes an asserted `stationary_camera`
+  source, two-pass ROI crop, stricter key-joint pose validity, a takeoff-window
+  pose metric, and takeoff-anchor review. Two newer clips pass the implemented
+  report gates.
+- Keep Phase 10 personal fine-tuning blocked. The analyser still caches every
+  processed sample when sample output is requested, while the fine-tune loader
+  filters only peak CoM. Add admitted-only caching before training.
+- Tighten takeoff-anchor review with a minimum launch-velocity threshold. The
+  current positive-only check can accept a weak approach stride close to apex.
+- Require explicit fixed-camera confirmation in durable local metadata before
+  treating the asserted stationary capture mode as admission-grade.
+- Phase 10 prep hardening completed: `stationary_camera` is now emitted only
+  when stationary mode is paired with explicit operator confirmation that the
+  camera did not pan, tilt, zoom, or move.
+- Takeoff-anchor review now requires `vy >= 2.0 m/s`, and anchor-review failure
+  rejects both kinematics grade and training grade.
+- `--save-samples` now caches only `training_grade` samples and records every
+  decision in ignored local `_admission_manifest.json`. The personal fine-tune
+  loader refuses legacy mixed caches without that manifest.
+- Local end-to-end verification recorded five reviewed admission decisions,
+  saved exactly two admitted samples, and completed a dry-run fine-tune load.
+  Keep real fine-tuning blocked until a larger 60 fps stationary session and
+  held-out split are available.
+- Raw pre-calibration anthropometry was checked across the five local
+  stationary clips with and without ROI crop. Lower-limb held-out proportions
+  are credible: MediaPipe-world shank and thigh estimates are within 2 % of
+  taped measurements and 2D projected checks are within 8 %. Arm length is
+  underestimated by roughly 15-22 %, so do not use arm landmarks as a scale
+  anchor. This does not validate absolute scene scale or run-up velocity.

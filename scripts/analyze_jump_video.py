@@ -6,7 +6,8 @@ Full pipeline: video → pose → joint angles → CoM → phase metrics
 Usage:
     python scripts/analyze_jump_video.py path/to/jump.mp4
     python scripts/analyze_jump_video.py path/to/jump.mp4 --mass 67 --height 1.75
-    python scripts/analyze_jump_video.py path/to/jump.mp4 --model experiments/results/pretrain_dynamics/best_model.pth
+    python scripts/analyze_jump_video.py path/to/jump.mp4 \
+        --model experiments/results/pretrain_dynamics/best_model.pth
     python scripts/analyze_jump_video.py data/videos/raw/  # process all videos in a folder
 """
 
@@ -23,23 +24,15 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from src.data_pipeline.admission import record_admission_decision
 from src.data_pipeline.sample import BiomechanicalSample, MovementType, SubjectInfo
-from src.pose_estimation.estimators.mediapipe_estimator import MediaPipeEstimator
-from src.pose_estimation.skeleton.com_estimation import compute_com_trajectory
-from src.pose_estimation.skeleton.joint_angles import compute_joint_angles_sequence
 from src.kinematics.run_up_analysis import (
     compute_horizontal_velocity,
     detect_ground_contacts,
 )
-from src.kinematics.takeoff_analysis import (
-    compute_takeoff_angle,
-    estimate_grf_from_com,
-)
-from src.pose_estimation.skeleton.landmark_postprocessor import (
-    PostProcessorConfig,
-    postprocess_landmarks,
-)
+from src.kinematics.takeoff_analysis import estimate_grf_from_com
 from src.pose_estimation.egomotion import estimate_camera_motion
+from src.pose_estimation.estimators.mediapipe_estimator import MediaPipeEstimator
 from src.pose_estimation.opensim_ik import is_opensim_available, run_opensim_ik
 from src.pose_estimation.scale_calibration import (
     calibrate_landmarks_to_world,
@@ -47,6 +40,12 @@ from src.pose_estimation.scale_calibration import (
     compute_per_frame_scale_mpp,
 )
 from src.pose_estimation.scene_calibration import detect_scene_anchors
+from src.pose_estimation.skeleton.com_estimation import compute_com_trajectory
+from src.pose_estimation.skeleton.joint_angles import compute_joint_angles_sequence
+from src.pose_estimation.skeleton.landmark_postprocessor import (
+    PostProcessorConfig,
+    postprocess_landmarks,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
@@ -70,6 +69,7 @@ class QualityGateConfig:
 
 
 DEFAULT_QUALITY_GATES = QualityGateConfig()
+MIN_TAKEOFF_LAUNCH_VERTICAL_MPS = 2.0
 
 
 def parse_bar_height(filename: str) -> float | None:
@@ -78,6 +78,15 @@ def parse_bar_height(filename: str) -> float | None:
     # Match decimal like _1.75 or _1.88 before the extension
     m = re.search(r'_(\d+\.\d+)(?:\.[a-zA-Z0-9]+)?$', filename)
     return float(m.group(1)) if m else None
+
+
+def resolve_bar_height(filename: str, override_m: float | None = None) -> float | None:
+    """Return explicit bar height when supplied, otherwise parse the filename."""
+    if override_m is not None:
+        if override_m <= 0:
+            raise ValueError("bar height override must be positive")
+        return float(override_m)
+    return parse_bar_height(filename)
 
 
 def parse_session_date(path: Path) -> str | None:
@@ -117,10 +126,19 @@ def infer_default_report_dir(samples_dir: Path | None) -> Path:
     return default_dir
 
 
+def _write_json_report(path: Path, report: object) -> None:
+    """Write a report, creating an explicitly requested parent directory."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(report, f, indent=2)
+
+
 # ── Pose Extraction ───────────────────────────────────────────────────
 
 
-def extract_poses(video_path: Path) -> tuple[np.ndarray, np.ndarray, float, int, int]:
+def extract_poses(
+    video_path: Path, use_roi_crop: bool = False
+) -> tuple[np.ndarray, np.ndarray, float, int, int]:
     """Run MediaPipe BlazePose on a video and return 2D + 3D landmarks.
 
     Returns:
@@ -129,9 +147,14 @@ def extract_poses(video_path: Path) -> tuple[np.ndarray, np.ndarray, float, int,
         fps: Video frame rate.
         width: Video frame width in pixels.
         height: Video frame height in pixels.
+
+    When use_roi_crop=True, a two-pass athlete-crop strategy is used to improve
+    MediaPipe detection when the athlete occupies a small fraction of the frame.
+    Landmarks are remapped to full-frame normalised coordinates so downstream
+    scale_calibration (which uses image_width/height projections) is unaffected.
     """
     estimator = MediaPipeEstimator(model_complexity=2)
-    sequence = estimator.process_video(video_path)
+    sequence = estimator.process_video(video_path, roi_crop=use_roi_crop)
 
     if not sequence.frames:
         raise ValueError(f"No poses detected in {video_path}")
@@ -170,12 +193,57 @@ def extract_poses(video_path: Path) -> tuple[np.ndarray, np.ndarray, float, int,
     return landmarks_2d, landmarks_3d, sequence.fps, vid_width, vid_height
 
 
+# [TIGHTENED — Phase 10 stationary validation, Change 4]
+# Previously: frame valid if >=4 of 33 landmarks visible (weak proxy).
+# Now: frame valid only when ALL 8 key joints (shoulders/hips/knees/ankles,
+# consistent with PoseFrame.is_valid) are visible. The 60 % gate is unchanged.
+# This is a deliberate tightening; do NOT revert to the 4-of-33 criterion.
+_KEY_JOINT_INDICES = np.array([11, 12, 23, 24, 25, 26, 27, 28])  # BlazePose indices
+
+
 def pose_validity_pct(landmarks_2d: np.ndarray, min_visibility: float = 0.5) -> float:
-    """Estimate pose-valid frame percentage from landmark visibility."""
+    """Fraction (%) of frames where all 8 key joints are visible at min_visibility.
+
+    Key joints: both shoulders (11,12), hips (23,24), knees (25,26), ankles (27,28).
+    Matches PoseFrame.is_valid so the same frames are flagged valid in both contexts.
+    The 60 % admission threshold is unchanged; only the per-frame criterion tightened.
+
+    NOTE: This is the GLOBAL metric (whole clip). For the admission gate, use
+    takeoff_window_pose_validity_pct when available — early approach frames where
+    the athlete is too far from camera to detect drag the global number down.
+    """
     if landmarks_2d.size == 0:
         return 0.0
-    visible_counts = np.count_nonzero(landmarks_2d[:, :, 2] >= min_visibility, axis=1)
-    return float(np.mean(visible_counts >= 4) * 100.0)
+    key_vis = landmarks_2d[:, _KEY_JOINT_INDICES, 2]  # (T, 8)
+    return float(np.mean(np.all(key_vis >= min_visibility, axis=1)) * 100.0)
+
+
+def takeoff_window_pose_validity_pct(
+    landmarks_2d: np.ndarray,
+    takeoff_frame: int,
+    half_window: int = 30,
+    min_visibility: float = 0.5,
+) -> float:
+    """Key-joint validity rate in a ±half_window frame window around takeoff.
+
+    This is the gate metric for stationary (and handheld) clips. It measures
+    pose coverage in the critical region — final approach strides, takeoff, and
+    early flight — excluding the early run-up where the athlete is far from camera
+    and undetectable. At 30 fps, half_window=30 covers ±1 second (2 s total),
+    which spans the last 2-3 strides and the flight phase.
+
+    The plan gate 'pose_validity_pct >= 60' should be read as coverage in this
+    window, not over the whole clip. Using the whole-clip rate penalises clips
+    where the athlete starts far away, which is irrelevant to takeoff kinematics.
+    """
+    n_frames = landmarks_2d.shape[0]
+    start = max(0, takeoff_frame - half_window)
+    end = min(n_frames, takeoff_frame + half_window)
+    window = landmarks_2d[start:end]
+    if window.shape[0] == 0:
+        return 0.0
+    key_vis = window[:, _KEY_JOINT_INDICES, 2]  # (W, 8)
+    return float(np.mean(np.all(key_vis >= min_visibility, axis=1)) * 100.0)
 
 
 def segment_spread_ratio(calibration_info: dict | None) -> float | None:
@@ -196,30 +264,57 @@ def segment_spread_ratio(calibration_info: dict | None) -> float | None:
     return float(max(scales) / min_scale)
 
 
-def _calibration_source(calibration_info: dict | None) -> str:
+def _calibration_source(
+    calibration_info: dict | None,
+    capture_mode: str = "handheld",
+    stationary_camera_confirmed: bool = False,
+) -> str:
+    """Return the horizontal-reference source for the quality gate.
+
+    For panned footage, the source is derived from egomotion or scene_homography.
+    For stationary footage, the fixed camera itself is the scene-fixed horizontal
+    reference, so we credit "stationary_camera" when egomotion/scene_homography
+    are not active. This requires both the asserted capture mode and a separate
+    operator confirmation after reviewing the footage. It is never inferred.
+    """
     method = (calibration_info or {}).get("method")
     if method in {"egomotion", "scene_homography"}:
         return method
+    if capture_mode == "stationary" and stationary_camera_confirmed:
+        return "stationary_camera"
     return "none"
 
 
 def _quality_block(
     *,
     pose_pct: float,
+    windowed_pose_pct: float | None = None,
     contact_interval_detected: bool,
     calibration_info: dict | None,
     peak_com_height_m: float,
     takeoff_horizontal_mps: float | None,
     takeoff_angle_deg: float | None,
+    capture_mode: str = "handheld",
+    stationary_camera_confirmed: bool = False,
+    takeoff_anchor_review_passed: bool = True,
     gates: QualityGateConfig = DEFAULT_QUALITY_GATES,
 ) -> dict:
     spread = segment_spread_ratio(calibration_info)
-    source = _calibration_source(calibration_info)
+    source = _calibration_source(
+        calibration_info,
+        capture_mode,
+        stationary_camera_confirmed=stationary_camera_confirmed,
+    )
     anatomical_scale_converged = spread is None or spread <= gates.max_segment_spread_ratio
     kinematics_scale_ok = spread is None or spread <= gates.max_kinematics_segment_spread_ratio
 
+    # Gate on the windowed metric when available (preferred: measures the critical
+    # takeoff/flight window, not the whole clip including far-approach frames).
+    # Falls back to global metric for short clips or when no takeoff frame is known.
+    pose_pct_for_gate = windowed_pose_pct if windowed_pose_pct is not None else pose_pct
+
     training_failures: list[str] = []
-    if pose_pct < gates.min_pose_validity_pct:
+    if pose_pct_for_gate < gates.min_pose_validity_pct:
         training_failures.append("pose_validity_below_threshold")
     if not contact_interval_detected:
         training_failures.append("no_contact_interval")
@@ -227,6 +322,8 @@ def _quality_block(
         training_failures.append("anatomical_segment_spread_high")
     if source == "none":
         training_failures.append("no_scene_fixed_horizontal_source")
+    if not takeoff_anchor_review_passed:
+        training_failures.append("takeoff_anchor_review_failed")
     if takeoff_horizontal_mps is None or not (
         gates.min_takeoff_horizontal_mps
         <= takeoff_horizontal_mps
@@ -241,16 +338,23 @@ def _quality_block(
         training_failures.append("peak_com_above_guardrail")
 
     kinematics_failures: list[str] = []
-    if pose_pct < gates.min_kinematics_pose_validity_pct:
+    if pose_pct_for_gate < gates.min_kinematics_pose_validity_pct:
         kinematics_failures.append("pose_validity_below_kinematics_threshold")
     if not contact_interval_detected:
         kinematics_failures.append("no_contact_interval")
+    if not takeoff_anchor_review_passed:
+        kinematics_failures.append("takeoff_anchor_review_failed")
     if not kinematics_scale_ok:
         kinematics_failures.append("anatomical_segment_spread_high")
 
     return {
         "pose_validity_pct": round(float(pose_pct), 2),
+        "takeoff_window_pose_validity_pct": (
+            round(float(windowed_pose_pct), 2) if windowed_pose_pct is not None else None
+        ),
         "contact_interval_detected": bool(contact_interval_detected),
+        "stationary_camera_confirmed": bool(stationary_camera_confirmed),
+        "takeoff_anchor_review_passed": bool(takeoff_anchor_review_passed),
         "anatomical_scale_converged": bool(anatomical_scale_converged),
         "segment_spread_ratio": round(spread, 3) if spread is not None else None,
         "scene_fixed_horizontal_source": source,
@@ -259,6 +363,52 @@ def _quality_block(
         "training_grade_failures": training_failures,
         "kinematics_grade_failures": kinematics_failures,
     }
+
+
+# ── Takeoff anchor validation ──────────────────────────────────────────
+
+
+def _validate_takeoff_anchor(
+    candidate_frame: int,
+    peak_com_frame: int,
+    com_vel: np.ndarray,
+    fps: float,
+    min_launch_vertical_mps: float = MIN_TAKEOFF_LAUNCH_VERTICAL_MPS,
+) -> bool:
+    """Return True when candidate_frame is a plausible toe-off, not an approach stride.
+
+    Two physics-based checks:
+
+    (a) Upward launch condition: CoM vertical velocity must meet the minimum
+        launch threshold at the candidate frame and peak CoM must come after it.
+        A weak approach-stride contact can have slightly positive vertical
+        velocity, but it is not a plausible high-jump toe-off.
+
+    (b) Flight-time plausibility: from projectile physics, the elapsed time from
+        toe-off to peak CoM is at most t_apex = v_y / g (time to apex).  With a
+        2× safety margin the maximum allowable frame lead is:
+            max_lead_frames = ceil(2 * v_y / g * fps)
+        A contact that precedes peak CoM by more than this is an approach stride,
+        not takeoff — the selected frame corresponds to toe-off of an earlier step
+        rather than the final ground contact.  The margin accounts for noise in
+        the velocity estimate.
+
+    Minimum launch v_y: 2.0 m/s by default. This is deliberately conservative
+    relative to the current 3-4.5 m/s takeoff expectation and rejects noisy
+    near-zero approach-stride contacts close to apex.
+    """
+    g = 9.81
+    if candidate_frame >= len(com_vel):
+        return False
+    vy = float(com_vel[candidate_frame, 1])
+    # (a) strong upward launch at toe-off and peak is later
+    if vy < min_launch_vertical_mps or peak_com_frame <= candidate_frame:
+        return False
+    # (b) flight-time lead: cap outliers so noise cannot enlarge the window.
+    vy_for_lead = min(vy, 5.5)
+    t_apex_s = vy_for_lead / g
+    max_lead_frames = int(np.ceil(2.0 * t_apex_s * fps))
+    return (peak_com_frame - candidate_frame) <= max_lead_frames
 
 
 # ── Kinematics ─────────────────────────────────────────────────────────
@@ -297,18 +447,6 @@ def compute_kinematics(
 
     # ── Horizontal speed profile ──
     horizontal_speed = compute_horizontal_velocity(com_pos, fps)
-
-    # ── Ground contacts (from ankle height) ──
-    # Use left ankle (27) and right ankle (28) — take minimum y
-    left_ankle_y = landmarks_3d[:, 27, 1]
-    right_ankle_y = landmarks_3d[:, 28, 1]
-    min_ankle_y = np.minimum(left_ankle_y, right_ankle_y)
-
-    # MediaPipe world landmarks have y pointing down, so contacts when y is large
-    # Actually, coordinates depend on the model. Just report what we have.
-    ankle_positions = np.column_stack([
-        np.zeros(n_frames), min_ankle_y, np.zeros(n_frames)
-    ])
 
     return {
         "joint_angles_rad": joint_angles_rad,
@@ -390,7 +528,6 @@ def run_pinn_inference(
         config = checkpoint.get("config", {})
 
         # Reconstruct the same input format as DynamicsDataset._add_com_windows
-        dt = 1.0 / sample.fps if sample.fps > 0 else 1.0 / 30.0
         t = np.linspace(0, 1, sample.n_frames, dtype=np.float32)
         input_data = np.column_stack([
             t,
@@ -430,14 +567,24 @@ def run_pinn_inference(
 def select_takeoff_frame_details(
     sample: BiomechanicalSample,
     fallback_frame: int,
-) -> tuple[int, bool, int]:
-    """Select toe-off and report whether a contact interval was detected.
+) -> tuple[int, bool, int, bool]:
+    """Select toe-off frame and validate that it is a plausible toe-off.
+
+    Returns:
+        (frame, contact_interval_detected, contact_count, takeoff_anchor_review_passed)
+
+    contact_interval_detected: True when at least one ankle-ground contact was
+        found.  The argmax(vy) fallback is used when False.
+    takeoff_anchor_review_passed: True only when the selected frame passes
+        _validate_takeoff_anchor — i.e. vy > 0, peak CoM follows, and the
+        frame is not too early to be an approach stride.  Always False when no
+        contact interval was detected (argmax fallback is not admission-safe).
 
     `detect_ground_contacts` works in centimetres; video-pipeline pose landmarks
     are calibrated in metres, so ankle trajectories are converted before use.
     """
     if sample.pose_3d is None or sample.pose_3d.ndim != 3 or sample.pose_3d.shape[1] <= 28:
-        return fallback_frame, False, 0
+        return fallback_frame, False, 0, False
 
     contacts: list[tuple[int, int]] = []
     for ankle_idx in (27, 28):
@@ -447,8 +594,9 @@ def select_takeoff_frame_details(
         contacts.extend(detect_ground_contacts(ankle_m * 100.0, sample.fps))
 
     if not contacts:
-        return fallback_frame, False, 0
+        return fallback_frame, False, 0, False
 
+    peak_com_frame = fallback_frame
     if sample.com_position is not None and len(sample.com_position) > 0:
         peak_com_frame = int(np.argmax(sample.com_position[:, 1]))
         pre_peak_contacts = [contact for contact in contacts if contact[1] <= peak_com_frame]
@@ -456,7 +604,15 @@ def select_takeoff_frame_details(
             contacts = pre_peak_contacts
 
     contacts.sort(key=lambda contact: (contact[1], contact[0]))
-    return int(contacts[-1][1]), True, len(contacts)
+    candidate_frame = int(contacts[-1][1])
+
+    anchor_review_passed = False
+    if sample.com_velocity is not None and len(sample.com_velocity) > 0:
+        anchor_review_passed = _validate_takeoff_anchor(
+            candidate_frame, peak_com_frame, sample.com_velocity, sample.fps
+        )
+
+    return candidate_frame, True, len(contacts), anchor_review_passed
 
 
 def select_takeoff_frame_from_ground_contact(
@@ -464,7 +620,7 @@ def select_takeoff_frame_from_ground_contact(
     fallback_frame: int,
 ) -> int:
     """Backward-compatible takeoff-frame selector."""
-    frame, _detected, _count = select_takeoff_frame_details(sample, fallback_frame)
+    frame, _detected, _count, _anchor = select_takeoff_frame_details(sample, fallback_frame)
     return frame
 
 
@@ -474,7 +630,10 @@ def generate_report(
     bar_height_m: float | None = None,
     calibration_info: dict | None = None,
     pose_validity_pct_value: float | None = None,
+    windowed_pose_validity_pct_value: float | None = None,
     quality_gates: QualityGateConfig = DEFAULT_QUALITY_GATES,
+    capture_mode: str = "handheld",
+    stationary_camera_confirmed: bool = False,
 ) -> dict:
     """Generate a summary report of the jump analysis."""
     mass = sample.subject.body_mass_kg
@@ -490,7 +649,6 @@ def generate_report(
     # Velocity metrics
     horizontal_speed = np.sqrt(com_vel[:, 0] ** 2 + com_vel[:, 2] ** 2)
     peak_horizontal = float(horizontal_speed.max())
-    vertical_at_peak_horizontal = float(com_vel[np.argmax(horizontal_speed), 1])
 
     # GRF metrics (from Newton's law estimation)
     grf = sample.grf
@@ -504,8 +662,14 @@ def generate_report(
     vy = com_vel[:, 1]
     if len(vy) >= 2:
         fallback_takeoff_frame = int(np.argmax(vy))
-        takeoff_frame, contact_interval_detected, contact_interval_count = select_takeoff_frame_details(
-            sample, fallback_frame=fallback_takeoff_frame,
+        (
+            takeoff_frame,
+            contact_interval_detected,
+            contact_interval_count,
+            takeoff_anchor_review_passed,
+        ) = select_takeoff_frame_details(
+            sample,
+            fallback_frame=fallback_takeoff_frame,
         )
         takeoff_vel = com_vel[takeoff_frame]
         takeoff_horiz = float(np.sqrt(takeoff_vel[0] ** 2 + takeoff_vel[2] ** 2))
@@ -515,17 +679,22 @@ def generate_report(
         takeoff_frame = 0
         contact_interval_detected = False
         contact_interval_count = 0
+        takeoff_anchor_review_passed = False
         takeoff_angle = None
         takeoff_horiz = None
         takeoff_vert = None
 
     quality = _quality_block(
         pose_pct=pose_validity_pct_value if pose_validity_pct_value is not None else 0.0,
+        windowed_pose_pct=windowed_pose_validity_pct_value,
         contact_interval_detected=contact_interval_detected,
         calibration_info=calibration_info,
         peak_com_height_m=peak_com_height,
         takeoff_horizontal_mps=takeoff_horiz,
         takeoff_angle_deg=takeoff_angle,
+        capture_mode=capture_mode,
+        stationary_camera_confirmed=stationary_camera_confirmed,
+        takeoff_anchor_review_passed=takeoff_anchor_review_passed,
         gates=quality_gates,
     )
 
@@ -609,6 +778,10 @@ def analyze_video(
     use_egomotion: bool = False,
     scene_detection_stride: int = 15,
     scene_max_detection_width: int = 640,
+    bar_height_m: float | None = None,
+    capture_mode: str = "handheld",
+    stationary_camera_confirmed: bool = False,
+    use_roi_crop: bool = False,
 ) -> dict:
     """Run the full analysis pipeline on a single video.
 
@@ -621,11 +794,17 @@ def analyze_video(
     Phase 9a multi-segment per-frame estimator (much more accurate).
     """
     logger.info(f"=== Analyzing: {video_path.name} ===")
+    if stationary_camera_confirmed and capture_mode != "stationary":
+        raise ValueError(
+            "stationary camera confirmation requires capture_mode='stationary'"
+        )
 
     # 1. Pose estimation (2D normalised + 3D world)
-    landmarks_2d, landmarks_3d_world, fps, vid_w, vid_h = extract_poses(video_path)
+    landmarks_2d, landmarks_3d_world, fps, vid_w, vid_h = extract_poses(
+        video_path, use_roi_crop=use_roi_crop
+    )
     pose_pct = pose_validity_pct(landmarks_2d)
-    bar_height = parse_bar_height(video_path.name)
+    bar_height = resolve_bar_height(video_path.name, bar_height_m)
 
     # 1a. Scale calibration: prefer multi-segment per-frame (Phase 9a) when
     #     anthropometric segment lengths are supplied; fall back to legacy
@@ -725,6 +904,15 @@ def analyze_video(
             "egomotion_decision_reason": "unavailable",
             "scale_info": scale_info,
         }
+    calibration_info["capture_mode"] = capture_mode
+    calibration_info["stationary_camera_confirmed"] = bool(stationary_camera_confirmed)
+    calibration_source = _calibration_source(
+        calibration_info,
+        capture_mode,
+        stationary_camera_confirmed=stationary_camera_confirmed,
+    )
+    if calibration_source != "none":
+        calibration_info["scene_fixed_horizontal_source"] = calibration_source
     logger.info(
         f"  Scale calibration applied: athlete height = {height_m:.2f}m, "
         f"CoM Y range = {landmarks_3d[:, :, 1].min():.2f}–"
@@ -783,6 +971,15 @@ def analyze_video(
     if model_path:
         pinn_grf = run_pinn_inference(sample, model_path)
 
+    # 4a. Windowed pose validity: measure coverage only in the critical takeoff
+    # window (±30 frames).  This requires the takeoff frame, so compute it here
+    # using the same logic that generate_report uses internally.
+    windowed_pose_pct: float | None = None
+    if sample.com_velocity is not None and len(sample.com_velocity) >= 2:
+        _fb = int(np.argmax(sample.com_velocity[:, 1]))
+        _tf, _, _, _ = select_takeoff_frame_details(sample, _fb)
+        windowed_pose_pct = takeoff_window_pose_validity_pct(landmarks_2d, _tf)
+
     # 5. Generate report
     report = generate_report(
         sample,
@@ -790,6 +987,9 @@ def analyze_video(
         bar_height_m=bar_height,
         calibration_info=calibration_info,
         pose_validity_pct_value=pose_pct,
+        windowed_pose_validity_pct_value=windowed_pose_pct,
+        capture_mode=capture_mode,
+        stationary_camera_confirmed=stationary_camera_confirmed,
     )
 
     # 6. Add session metadata
@@ -798,14 +998,50 @@ def analyze_video(
         report["session_date"] = session_date
     report["session_folder"] = video_path.parent.name
 
-    # 7. Cache the sample for personal-data fine-tuning, if requested
+    # 7. Cache admitted samples for personal-data fine-tuning, if requested
     if samples_out_dir is not None:
-        samples_out_dir.mkdir(parents=True, exist_ok=True)
-        sample_path = samples_out_dir / f"{video_path.stem}.npz"
-        sample.save_npz(sample_path)
-        report["sample_npz"] = str(sample_path)
+        _cache_admitted_sample(sample, report, samples_out_dir)
 
     return report
+
+
+def _cache_admitted_sample(
+    sample: BiomechanicalSample,
+    report: dict,
+    samples_out_dir: Path,
+) -> Path | None:
+    """Cache a sample only when its report passed every training-grade gate."""
+    admitted = report.get("quality", {}).get("training_grade") is True
+    cache_info = {
+        "requested": True,
+        "admitted": admitted,
+        "saved": False,
+        "decision_reason": "training_grade_required",
+    }
+    report["sample_cache"] = cache_info
+    sample_path: Path | None = None
+    if admitted:
+        samples_out_dir.mkdir(parents=True, exist_ok=True)
+        sample_path = samples_out_dir / f"{sample.trial_id}.npz"
+        sample.save_npz(sample_path)
+        report["sample_npz"] = str(sample_path)
+        cache_info["saved"] = True
+        cache_info["decision_reason"] = "training_grade_passed"
+
+    manifest_path = record_admission_decision(
+        samples_out_dir,
+        trial_id=sample.trial_id,
+        admitted=admitted,
+        saved=cache_info["saved"],
+        stationary_camera_confirmed=bool(
+            report.get("quality", {}).get("stationary_camera_confirmed", False)
+        ),
+        training_grade_failures=list(
+            report.get("quality", {}).get("training_grade_failures", [])
+        ),
+    )
+    cache_info["manifest"] = str(manifest_path)
+    return sample_path
 
 
 def main():
@@ -820,6 +1056,10 @@ def main():
     )
     parser.add_argument("--mass", type=float, default=65.0, help="Body mass in kg")
     parser.add_argument("--height", type=float, default=1.75, help="Height in metres")
+    parser.add_argument(
+        "--bar-height", type=float, default=None,
+        help="Bar height in metres. Overrides filename-derived metadata.",
+    )
     parser.add_argument(
         "--thigh", type=float, default=0.45,
         help="Measured hip→knee length in metres (Athlete A: 0.45). "
@@ -844,7 +1084,7 @@ def main():
     parser.add_argument(
         "--save-samples", type=str, default=None,
         nargs="?", const="data/results/samples",
-        help="Cache extracted BiomechanicalSamples as .npz under the given "
+        help="Cache training-grade BiomechanicalSamples as .npz under the given "
              "directory (defaults to data/results/samples when flag is bare). "
              "Required input for scripts/finetune_personal.py.",
     )
@@ -865,7 +1105,33 @@ def main():
         "--scene-max-detection-width", type=int, default=640,
         help="Resize width for scene-anchor detection. Lower is faster; higher is sharper.",
     )
+    parser.add_argument(
+        "--capture-mode", choices=("handheld", "stationary"), default="handheld",
+        help=(
+            "Capture workflow. Use 'stationary' for fixed-camera footage, then "
+            "also pass --stationary-camera-confirmed after visual review to credit "
+            "the camera as a scene-fixed horizontal source."
+        ),
+    )
+    parser.add_argument(
+        "--stationary-camera-confirmed", action="store_true",
+        help=(
+            "Confirm operator review found no pan, tilt, zoom, or camera movement. "
+            "Only valid with --capture-mode stationary; required for training admission."
+        ),
+    )
+    parser.add_argument(
+        "--roi-crop", choices=("on", "off"), default="off",
+        help=(
+            "Opt-in two-pass athlete ROI crop. Pass 1 detects on the full frame to "
+            "locate the athlete; pass 2 re-detects on the cropped region and remaps "
+            "landmarks to full-frame normalised coordinates. Use when the athlete "
+            "occupies a small fraction of the frame (e.g. far-back stationary camera)."
+        ),
+    )
     args = parser.parse_args()
+    if args.stationary_camera_confirmed and args.capture_mode != "stationary":
+        parser.error("--stationary-camera-confirmed requires --capture-mode stationary")
 
     input_path = Path(args.input)
     model_path = Path(args.model)
@@ -894,6 +1160,10 @@ def main():
                 use_egomotion=args.egomotion == "on",
                 scene_detection_stride=args.scene_detection_stride,
                 scene_max_detection_width=args.scene_max_detection_width,
+                bar_height_m=args.bar_height,
+                capture_mode=args.capture_mode,
+                stationary_camera_confirmed=args.stationary_camera_confirmed,
+                use_roi_crop=args.roi_crop == "on",
             )
             all_reports.append(report)
 
@@ -932,8 +1202,7 @@ def main():
             else:
                 out_path = out_dir / "all_sessions_report.json"
 
-        with open(out_path, "w") as f:
-            json.dump(all_reports if len(all_reports) > 1 else all_reports[0], f, indent=2)
+        _write_json_report(out_path, all_reports if len(all_reports) > 1 else all_reports[0])
         logger.info(f"Report saved: {out_path}")
 
         # Also save per-session reports
@@ -945,8 +1214,7 @@ def main():
                 sessions.setdefault(folder, []).append(r)
             for session_name, reports in sessions.items():
                 session_path = out_dir / f"{session_name}_report.json"
-                with open(session_path, "w") as f:
-                    json.dump(reports, f, indent=2)
+                _write_json_report(session_path, reports)
             logger.info(f"  Per-session reports saved to {out_dir}")
 
         # Print summary table
@@ -960,8 +1228,16 @@ def main():
                 name = r['video'][:35]
                 bar = f"{r.get('bar_height_m', '')}"
                 rise = f"{r['com']['rise_m']:.3f}m"
-                angle = f"{r['velocity']['takeoff_angle_deg']}°" if r['velocity']['takeoff_angle_deg'] else "n/a"
-                pinn = f"{r.get('pinn_peak_vertical_grf_BW', 'n/a')} BW" if 'pinn_peak_vertical_grf_BW' in r else "n/a"
+                angle = (
+                    f"{r['velocity']['takeoff_angle_deg']}°"
+                    if r['velocity']['takeoff_angle_deg']
+                    else "n/a"
+                )
+                pinn = (
+                    f"{r.get('pinn_peak_vertical_grf_BW', 'n/a')} BW"
+                    if 'pinn_peak_vertical_grf_BW' in r
+                    else "n/a"
+                )
                 print(f"  {name:<35} {bar:>5} {rise:>9} {angle:>8} {pinn:>9}")
             print(f"{'=' * 80}")
 

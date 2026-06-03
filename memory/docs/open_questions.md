@@ -1,6 +1,6 @@
 # Open Questions
 
-Updated 2026-05-05 after the stationary-footage decision.
+Updated 2026-06-03 after the stationary admission-tooling audit.
 
 ## Closed
 
@@ -39,16 +39,24 @@ Updated 2026-05-05 after the stationary-footage decision.
 
 - Should the peak-CoM target range be revised after reviewing bar-relative
   CoM results with the BMS PhD student?
-- What stationary capture protocol gives the best accuracy/time trade-off
-  for Athlete A: one side/oblique tripod camera, two-camera DLT, or a staged
-  progression from one fixed camera to two?
-- On the first stationary capture session, does gravity-mpp converge with
-  anatomical mpp to within ≤0.3 m/s? If yes, both are working and Phase 10
-  fine-tuning can proceed. If no, the residual is a real anatomical bias
-  worth diagnosing before fine-tune.
+- Do the available stationary sets' camera placements provide
+  enough approach-direction coverage for training-grade takeoff velocity?
+  Two newer clips pass the implemented report gates, but collect a closer
+  60 fps session before personal fine-tuning.
 - Is one tripod side-view sufficient for the run-up direction velocity, or
   do we need an end-of-runway camera to capture the approach-direction
   component that side-view projects away?
 - Are there any panned clips worth retaining for *relative* analysis (stride
   rhythm, joint angles, body alignment) even though they cannot give
   training-grade translational metrics?
+
+## Closed (2026-06-03 prep hardening)
+
+- ~~What launch-velocity floor should anchor review require?~~ Use
+  `vy >= 2.0 m/s`; a merely positive value can admit a weak stride near apex.
+- ~~How should admitted-only caching be enforced?~~ Save `.npz` only for
+  `training_grade` clips, record every decision in ignored local
+  `_admission_manifest.json`, and refuse legacy mixed caches at fine-tune load.
+- ~~Where should fixed-camera confirmation live?~~ Require explicit CLI
+  operator confirmation and publish it in both the report and local admission
+  manifest before emitting the `stationary_camera` source.

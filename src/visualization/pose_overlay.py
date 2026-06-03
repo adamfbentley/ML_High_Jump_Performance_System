@@ -12,8 +12,10 @@ try:
 except ImportError:
     mp = None
 
-from src.pose_estimation.estimators.mediapipe_estimator import MediaPipeEstimator
-
+from src.pose_estimation.estimators.mediapipe_estimator import (
+    MediaPipeEstimator,
+    _nominal_fps_from_timestamps,
+)
 
 _LINE_COLOR = (80, 220, 120)
 _POINT_COLOR = (40, 180, 255)
@@ -33,6 +35,22 @@ _POSE_CONNECTIONS = [
     (24, 26), (26, 28), (28, 30), (30, 32),
     (27, 31), (28, 32),
 ]
+
+
+def _decoded_video_timing(video_path: Path) -> tuple[float, int]:
+    """Return nominal decoded FPS and actual decoded frame count."""
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise FileNotFoundError(f"Could not open video: {video_path}")
+
+    reported_fps = float(cap.get(cv2.CAP_PROP_FPS)) or 30.0
+    timestamps_ms: list[float] = []
+    while cap.grab():
+        timestamps_ms.append(float(cap.get(cv2.CAP_PROP_POS_MSEC)))
+    cap.release()
+
+    fps = _nominal_fps_from_timestamps(timestamps_ms, reported_fps)
+    return fps, len(timestamps_ms)
 
 
 def _draw_pose_landmarks(
@@ -93,13 +111,15 @@ def render_mediapipe_pose_overlay(
     if not cap.isOpened():
         raise FileNotFoundError(f"Could not open video: {video_path}")
 
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    fps, total_frames = _decoded_video_timing(video_path)
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+    if not writer.isOpened():
+        cap.release()
+        raise RuntimeError(f"Could not open overlay writer: {output_path}")
 
     options = PoseLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=estimator._model_path),
@@ -113,6 +133,7 @@ def render_mediapipe_pose_overlay(
 
     valid_frames = 0
     processed_frames = 0
+    previous_timestamp_ms = -1
 
     with PoseLandmarker.create_from_options(options) as landmarker:
         frame_idx = 0
@@ -123,7 +144,13 @@ def render_mediapipe_pose_overlay(
 
             rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-            timestamp_ms = int(frame_idx * 1000 / fps) if fps > 0 else frame_idx
+            decoded_timestamp_ms = float(cap.get(cv2.CAP_PROP_POS_MSEC))
+            if not np.isfinite(decoded_timestamp_ms) or (
+                frame_idx > 0 and decoded_timestamp_ms <= 0
+            ):
+                decoded_timestamp_ms = frame_idx * 1000.0 / fps if fps > 0 else frame_idx
+            timestamp_ms = max(previous_timestamp_ms + 1, int(round(decoded_timestamp_ms)))
+            previous_timestamp_ms = timestamp_ms
             result = landmarker.detect_for_video(mp_image, timestamp_ms)
 
             pose_valid = False

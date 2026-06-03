@@ -8,21 +8,33 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-
-from scripts.analyze_jump_video import generate_report, parse_bar_height
+from scripts.analyze_jump_video import (
+    _KEY_JOINT_INDICES,
+    _cache_admitted_sample,
+    _calibration_source,
+    _quality_block,
+    _validate_takeoff_anchor,
+    _write_json_report,
+    generate_report,
+    parse_bar_height,
+    pose_validity_pct,
+    resolve_bar_height,
+    select_takeoff_frame_details,
+    takeoff_window_pose_validity_pct,
+)
+from src.data_pipeline.admission import admitted_sample_paths, load_admission_manifest
 from src.data_pipeline.sample import BiomechanicalSample, MovementType, SubjectInfo
 from src.kinematics.takeoff_analysis import (
     TakeoffMetrics,
-    estimate_grf_from_com,
-    compute_takeoff_angle,
-    predict_max_com_height,
-    compute_impulse,
+    compute_arm_drive_metrics,
     compute_body_alignment_deviation,
     compute_foot_to_ground_angle,
-    compute_arm_drive_metrics,
     compute_free_knee_drive_metrics,
+    compute_impulse,
+    compute_takeoff_angle,
+    estimate_grf_from_com,
+    predict_max_com_height,
 )
-
 
 # ── TakeoffMetrics new fields ─────────────────────────────────────────────
 
@@ -52,6 +64,15 @@ def test_takeoff_metrics_new_fields_have_defaults():
     assert m.arm_drive_peak_timing_ms == 0.0
     assert m.free_knee_drive_peak_speed_mps == 0.0
     assert m.free_knee_drive_peak_timing_ms == 0.0
+
+
+def test_write_json_report_creates_explicit_parent_directory(tmp_path):
+    """Explicit report destinations may use a new nested result directory."""
+    report_path = tmp_path / "stationary_rerun" / "report.json"
+
+    _write_json_report(report_path, {"processed": 5})
+
+    assert report_path.read_text() == '{\n  "processed": 5\n}'
 
 
 # ── compute_body_alignment_deviation ─────────────────────────────────────
@@ -323,3 +344,464 @@ def test_generate_report_uses_scene_corrected_horizontal_velocity_for_angle():
 
 def test_parse_bar_height_accepts_numeric_video_extension():
     assert parse_bar_height("session_attempt_1.88.mp4") == 1.88
+
+
+def test_resolve_bar_height_prefers_explicit_override():
+    assert resolve_bar_height("session_attempt_1.88.mp4", 1.75) == 1.75
+
+
+def test_resolve_bar_height_rejects_non_positive_override():
+    with pytest.raises(ValueError, match="bar height override must be positive"):
+        resolve_bar_height("session_attempt_1.88.mp4", 0.0)
+
+
+# ── Change 1: stationary_camera admission source ──────────────────────────
+
+def test_calibration_source_stationary_camera_when_confirmed():
+    """Reviewed stationary anatomical footage credits the fixed camera source."""
+    source = _calibration_source(
+        {"method": "anatomical"},
+        capture_mode="stationary",
+        stationary_camera_confirmed=True,
+    )
+    assert source == "stationary_camera"
+
+
+def test_calibration_source_stationary_camera_requires_confirmation():
+    """Stationary mode alone is not durable confirmation of a fixed camera."""
+    source = _calibration_source({"method": "anatomical"}, capture_mode="stationary")
+    assert source == "none"
+
+
+def test_calibration_source_handheld_default_returns_none():
+    """Default handheld mode with anatomical method → 'none' (no scene-fixed source)."""
+    source = _calibration_source({"method": "anatomical"}, capture_mode="handheld")
+    assert source == "none"
+
+
+def test_calibration_source_egomotion_takes_precedence():
+    """egomotion method always wins, regardless of capture_mode."""
+    source = _calibration_source({"method": "egomotion"}, capture_mode="stationary")
+    assert source == "egomotion"
+
+
+def test_quality_block_confirmed_stationary_does_not_append_no_scene_source():
+    """Confirmed stationary capture removes the missing scene-source failure."""
+    result = _quality_block(
+        pose_pct=100.0,
+        contact_interval_detected=True,
+        calibration_info={"method": "anatomical", "scale_info": {}},
+        peak_com_height_m=1.5,
+        takeoff_horizontal_mps=3.5,
+        takeoff_angle_deg=43.0,
+        capture_mode="stationary",
+        stationary_camera_confirmed=True,
+        takeoff_anchor_review_passed=True,
+    )
+    assert "no_scene_fixed_horizontal_source" not in result["training_grade_failures"]
+    assert result["scene_fixed_horizontal_source"] == "stationary_camera"
+    assert result["stationary_camera_confirmed"] is True
+
+
+def test_quality_block_unconfirmed_stationary_appends_no_scene_source():
+    """Stationary workflow without operator confirmation is not admission-grade."""
+    result = _quality_block(
+        pose_pct=100.0,
+        contact_interval_detected=True,
+        calibration_info={"method": "anatomical", "scale_info": {}},
+        peak_com_height_m=1.5,
+        takeoff_horizontal_mps=3.5,
+        takeoff_angle_deg=43.0,
+        capture_mode="stationary",
+        stationary_camera_confirmed=False,
+        takeoff_anchor_review_passed=True,
+    )
+    assert "no_scene_fixed_horizontal_source" in result["training_grade_failures"]
+    assert result["stationary_camera_confirmed"] is False
+
+
+def test_quality_block_handheld_appends_no_scene_source():
+    """handheld default still fails the scene-fixed horizontal source gate."""
+    result = _quality_block(
+        pose_pct=100.0,
+        contact_interval_detected=True,
+        calibration_info={"method": "anatomical", "scale_info": {}},
+        peak_com_height_m=1.5,
+        takeoff_horizontal_mps=3.5,
+        takeoff_angle_deg=43.0,
+        capture_mode="handheld",
+        takeoff_anchor_review_passed=True,
+    )
+    assert "no_scene_fixed_horizontal_source" in result["training_grade_failures"]
+
+
+def test_generate_report_stationary_credited_in_calibration_block():
+    """calibration block should carry capture_mode and scene_fixed_horizontal_source
+    when stationary is asserted."""
+    sample = _make_video_sample_for_takeoff_frame_test(
+        contact_slice=slice(8, 12),
+        true_takeoff_frame=11,
+        velocity_spike_frame=20,
+    )
+    report = generate_report(
+        sample,
+        pinn_grf=None,
+        calibration_info={
+            "method": "anatomical",
+            "capture_mode": "stationary",
+            "stationary_camera_confirmed": True,
+            "scene_fixed_horizontal_source": "stationary_camera",
+            "scale_info": {},
+        },
+        pose_validity_pct_value=100.0,
+        capture_mode="stationary",
+        stationary_camera_confirmed=True,
+    )
+    assert report["calibration"]["capture_mode"] == "stationary"
+    assert report["calibration"]["stationary_camera_confirmed"] is True
+    assert report["calibration"]["scene_fixed_horizontal_source"] == "stationary_camera"
+    assert report["quality"]["scene_fixed_horizontal_source"] == "stationary_camera"
+    assert report["quality"]["stationary_camera_confirmed"] is True
+    assert "no_scene_fixed_horizontal_source" not in report["quality"]["training_grade_failures"]
+
+
+# ── Change 2: takeoff-window correctness ──────────────────────────────────
+
+def _make_com_vel_for_anchor_test(n: int, fps: float, vy_at_frame: dict) -> np.ndarray:
+    """com_velocity array with custom vy values at specific frames."""
+    vel = np.zeros((n, 3), dtype=float)
+    vel[:, 0] = 3.0
+    vel[:, 1] = 2.0  # default upward
+    for frame, vy in vy_at_frame.items():
+        vel[frame, 1] = vy
+    return vel
+
+
+def test_validate_takeoff_anchor_passes_true_toeoff():
+    """Candidate at frame 10 with vy=3.5, peak at frame 20: plausible toe-off."""
+    fps = 30.0
+    n = 30
+    com_vel = _make_com_vel_for_anchor_test(n, fps, {10: 3.5})
+    assert _validate_takeoff_anchor(
+        candidate_frame=10, peak_com_frame=20, com_vel=com_vel, fps=fps
+    )
+
+
+def test_validate_takeoff_anchor_rejects_approach_stride():
+    """Candidate 50 frames before peak with vy=0.1 (approach stride) is rejected."""
+    fps = 30.0
+    n = 60
+    # vy=0.1 is below the minimum launch threshold and cannot be toe-off.
+    com_vel = _make_com_vel_for_anchor_test(n, fps, {5: 0.1})
+    assert not _validate_takeoff_anchor(
+        candidate_frame=5, peak_com_frame=55, com_vel=com_vel, fps=fps
+    )
+
+
+def test_validate_takeoff_anchor_rejects_negative_vy():
+    """Negative vy at candidate frame → not a toe-off."""
+    fps = 30.0
+    n = 20
+    com_vel = _make_com_vel_for_anchor_test(n, fps, {5: -0.5})
+    assert not _validate_takeoff_anchor(
+        candidate_frame=5, peak_com_frame=15, com_vel=com_vel, fps=fps
+    )
+
+
+def test_validate_takeoff_anchor_rejects_weak_positive_vy_near_apex():
+    """A nearby approach-stride contact with weak upward speed is not toe-off."""
+    fps = 30.0
+    n = 20
+    com_vel = _make_com_vel_for_anchor_test(n, fps, {5: 0.1})
+    assert not _validate_takeoff_anchor(
+        candidate_frame=5, peak_com_frame=10, com_vel=com_vel, fps=fps
+    )
+
+
+def test_validate_takeoff_anchor_rejects_candidate_at_or_after_peak():
+    """If peak_com_frame <= candidate_frame, the contact cannot be toe-off."""
+    fps = 30.0
+    n = 20
+    com_vel = _make_com_vel_for_anchor_test(n, fps, {15: 3.0})
+    assert not _validate_takeoff_anchor(
+        candidate_frame=15, peak_com_frame=10, com_vel=com_vel, fps=fps
+    )
+
+
+def test_select_takeoff_frame_details_anchor_review_passes_for_valid_contact():
+    """True toe-off contact → anchor_review_passed=True."""
+    sample = _make_video_sample_for_takeoff_frame_test(
+        contact_slice=slice(8, 12),
+        true_takeoff_frame=11,
+        velocity_spike_frame=20,
+    )
+    _frame, detected, _count, anchor_ok = select_takeoff_frame_details(
+        sample, fallback_frame=20
+    )
+    assert detected is True
+    assert anchor_ok is True
+
+
+def test_select_takeoff_frame_details_no_contact_flags_anchor_failed():
+    """No contact detected → anchor_review_passed=False (argmax fallback is not safe)."""
+    sample = _make_video_sample_for_takeoff_frame_test(
+        contact_slice=None,
+        true_takeoff_frame=11,
+        velocity_spike_frame=20,
+    )
+    _frame, detected, _count, anchor_ok = select_takeoff_frame_details(
+        sample, fallback_frame=20
+    )
+    assert detected is False
+    assert anchor_ok is False
+
+
+def test_generate_report_no_contact_includes_anchor_review_failure():
+    """When no contact is detected, report.quality should include anchor review failure."""
+    sample = _make_video_sample_for_takeoff_frame_test(
+        contact_slice=None,
+        true_takeoff_frame=11,
+        velocity_spike_frame=20,
+    )
+    report = generate_report(sample, pinn_grf=None)
+    assert report["quality"]["takeoff_anchor_review_passed"] is False
+    assert "takeoff_anchor_review_failed" in report["quality"]["training_grade_failures"]
+
+
+def test_generate_report_valid_contact_anchor_review_passed():
+    """Valid toe-off contact → anchor review passes in report."""
+    sample = _make_video_sample_for_takeoff_frame_test(
+        contact_slice=slice(8, 12),
+        true_takeoff_frame=11,
+        velocity_spike_frame=20,
+    )
+    report = generate_report(sample, pinn_grf=None)
+    assert report["quality"]["takeoff_anchor_review_passed"] is True
+    assert "takeoff_anchor_review_failed" not in report["quality"]["training_grade_failures"]
+
+
+def test_quality_block_anchor_review_failure_rejects_kinematics_grade():
+    """A questionable toe-off frame cannot emit kinematics-grade metrics."""
+    result = _quality_block(
+        pose_pct=100.0,
+        contact_interval_detected=True,
+        calibration_info={"method": "anatomical", "scale_info": {}},
+        peak_com_height_m=1.5,
+        takeoff_horizontal_mps=3.5,
+        takeoff_angle_deg=43.0,
+        capture_mode="stationary",
+        stationary_camera_confirmed=True,
+        takeoff_anchor_review_passed=False,
+    )
+    assert result["kinematics_grade"] is False
+    assert "takeoff_anchor_review_failed" in result["kinematics_grade_failures"]
+
+
+# ── Change 4: stricter key-joint pose_validity metric ─────────────────────
+
+def test_pose_validity_pct_all_key_joints_visible_returns_100():
+    """All 8 key joints visible on every frame → 100 %."""
+    lm = np.zeros((10, 33, 3), dtype=np.float32)
+    lm[:, _KEY_JOINT_INDICES, 2] = 0.9  # all key joints visible
+    assert pose_validity_pct(lm) == pytest.approx(100.0)
+
+
+def test_pose_validity_pct_missing_one_key_joint_returns_0():
+    """One key joint invisible → every frame fails → 0 %."""
+    lm = np.zeros((10, 33, 3), dtype=np.float32)
+    lm[:, _KEY_JOINT_INDICES, 2] = 0.9
+    lm[:, 27, 2] = 0.0  # left ankle invisible (index 27 is in _KEY_JOINT_INDICES)
+    assert pose_validity_pct(lm) == pytest.approx(0.0)
+
+
+def test_pose_validity_pct_many_non_key_joints_visible_does_not_pass():
+    """Old metric (>=4 of 33) would pass; new strict metric should not when key joints absent."""
+    lm = np.zeros((5, 33, 3), dtype=np.float32)
+    # Make 20 NON-key landmarks visible — old metric would pass, new must fail
+    non_key_indices = [i for i in range(33) if i not in _KEY_JOINT_INDICES.tolist()]
+    for idx in non_key_indices[:20]:
+        lm[:, idx, 2] = 0.9
+    # key joints remain invisible → strict metric should return 0
+    assert pose_validity_pct(lm) == pytest.approx(0.0)
+
+
+def test_pose_validity_pct_partial_frames():
+    """5 of 10 frames have all key joints visible → 50 %."""
+    lm = np.zeros((10, 33, 3), dtype=np.float32)
+    lm[:5, _KEY_JOINT_INDICES, 2] = 0.9  # first 5 frames valid
+    assert pose_validity_pct(lm) == pytest.approx(50.0)
+
+
+def test_quality_block_strict_validity_fails_below_60_pct():
+    """Pose validity below 60 % → pose_validity_below_threshold in training failures."""
+    result = _quality_block(
+        pose_pct=55.0,
+        contact_interval_detected=True,
+        calibration_info={"method": "anatomical", "scale_info": {}},
+        peak_com_height_m=1.5,
+        takeoff_horizontal_mps=3.5,
+        takeoff_angle_deg=43.0,
+        capture_mode="stationary",
+        stationary_camera_confirmed=True,
+        takeoff_anchor_review_passed=True,
+    )
+    assert "pose_validity_below_threshold" in result["training_grade_failures"]
+
+
+def test_quality_block_all_gates_pass_stationary():
+    """All gates satisfied for a stationary clip → training_grade True."""
+    result = _quality_block(
+        pose_pct=70.0,
+        contact_interval_detected=True,
+        calibration_info={"method": "anatomical", "scale_info": {}},
+        peak_com_height_m=1.5,
+        takeoff_horizontal_mps=3.5,
+        takeoff_angle_deg=43.0,
+        capture_mode="stationary",
+        stationary_camera_confirmed=True,
+        takeoff_anchor_review_passed=True,
+    )
+    assert result["training_grade"] is True
+    assert result["training_grade_failures"] == []
+
+
+# ── Windowed pose_validity metric ─────────────────────────────────────────
+
+def _make_approach_plus_jump_landmarks(
+    n_approach: int = 60,
+    n_jump: int = 60,
+) -> np.ndarray:
+    """Simulate a clip where approach frames have no detection, jump has full coverage."""
+    n_frames = n_approach + n_jump
+    lm = np.zeros((n_frames, 33, 3), dtype=np.float32)
+    # Jump window: all key joints visible
+    lm[n_approach:, _KEY_JOINT_INDICES, 2] = 0.9
+    return lm
+
+
+def test_windowed_pct_ignores_approach_frames():
+    """Global pct = 50%; windowed around takeoff (frame 90) = 100%."""
+    lm = _make_approach_plus_jump_landmarks(n_approach=60, n_jump=60)
+    global_pct = pose_validity_pct(lm)
+    windowed = takeoff_window_pose_validity_pct(lm, takeoff_frame=90, half_window=30)
+    assert global_pct == pytest.approx(50.0)
+    assert windowed == pytest.approx(100.0)
+
+
+def test_windowed_pct_all_zeros_for_missing_window():
+    """Takeoff frame beyond all detections → windowed returns 0."""
+    lm = _make_approach_plus_jump_landmarks(n_approach=60, n_jump=60)
+    windowed = takeoff_window_pose_validity_pct(lm, takeoff_frame=20, half_window=10)
+    assert windowed == pytest.approx(0.0)
+
+
+def test_quality_block_windowed_overrides_global_for_gate():
+    """Low global pct but high windowed → gate passes (windowed takes priority)."""
+    result = _quality_block(
+        pose_pct=30.0,           # global: would fail gate
+        windowed_pose_pct=75.0,  # windowed: passes gate
+        contact_interval_detected=True,
+        calibration_info={"method": "anatomical", "scale_info": {}},
+        peak_com_height_m=1.5,
+        takeoff_horizontal_mps=3.5,
+        takeoff_angle_deg=43.0,
+        capture_mode="stationary",
+        stationary_camera_confirmed=True,
+        takeoff_anchor_review_passed=True,
+    )
+    assert "pose_validity_below_threshold" not in result["training_grade_failures"]
+    assert result["takeoff_window_pose_validity_pct"] == pytest.approx(75.0)
+
+
+def test_quality_block_windowed_fails_when_below_threshold():
+    """High global pct but low windowed → gate still fails."""
+    result = _quality_block(
+        pose_pct=90.0,           # global: would pass
+        windowed_pose_pct=40.0,  # windowed: fails gate
+        contact_interval_detected=True,
+        calibration_info={"method": "anatomical", "scale_info": {}},
+        peak_com_height_m=1.5,
+        takeoff_horizontal_mps=3.5,
+        takeoff_angle_deg=43.0,
+        capture_mode="stationary",
+        stationary_camera_confirmed=True,
+        takeoff_anchor_review_passed=True,
+    )
+    assert "pose_validity_below_threshold" in result["training_grade_failures"]
+
+
+def test_quality_block_reports_both_global_and_windowed():
+    """Quality block must always report both pose_validity_pct and windowed."""
+    result = _quality_block(
+        pose_pct=35.0,
+        windowed_pose_pct=70.0,
+        contact_interval_detected=True,
+        calibration_info={"method": "anatomical", "scale_info": {}},
+        peak_com_height_m=1.5,
+        takeoff_horizontal_mps=3.5,
+        takeoff_angle_deg=43.0,
+        capture_mode="stationary",
+        stationary_camera_confirmed=True,
+        takeoff_anchor_review_passed=True,
+    )
+    assert result["pose_validity_pct"] == pytest.approx(35.0)
+    assert result["takeoff_window_pose_validity_pct"] == pytest.approx(70.0)
+
+
+# ── Admitted-only sample caching ──────────────────────────────────────────
+
+def test_cache_admitted_sample_writes_training_grade_npz(tmp_path):
+    """Training-grade clips are cached for later personal fine-tuning."""
+    sample = _make_video_sample_for_takeoff_frame_test(
+        contact_slice=slice(8, 12),
+        true_takeoff_frame=11,
+        velocity_spike_frame=20,
+    )
+    report = {"quality": {"training_grade": True}}
+
+    sample_path = _cache_admitted_sample(sample, report, tmp_path / "samples")
+
+    assert sample_path is not None
+    assert sample_path.exists()
+    assert report["sample_cache"]["requested"] is True
+    assert report["sample_cache"]["admitted"] is True
+    assert report["sample_cache"]["saved"] is True
+    assert report["sample_cache"]["decision_reason"] == "training_grade_passed"
+    assert report["sample_cache"]["manifest"].endswith("_admission_manifest.json")
+    assert report["sample_npz"] == str(sample_path)
+    assert admitted_sample_paths(tmp_path / "samples") == [sample_path]
+
+
+def test_cache_admitted_sample_skips_failed_clip(tmp_path):
+    """Rejected clips must not quietly appear in the fine-tuning cache."""
+    sample = _make_video_sample_for_takeoff_frame_test(
+        contact_slice=None,
+        true_takeoff_frame=11,
+        velocity_spike_frame=20,
+    )
+    report = {"quality": {"training_grade": False}}
+    samples_dir = tmp_path / "samples"
+
+    sample_path = _cache_admitted_sample(sample, report, samples_dir)
+
+    assert sample_path is None
+    assert samples_dir.exists()
+    assert "sample_npz" not in report
+    assert report["sample_cache"]["requested"] is True
+    assert report["sample_cache"]["admitted"] is False
+    assert report["sample_cache"]["saved"] is False
+    assert report["sample_cache"]["decision_reason"] == "training_grade_required"
+    assert report["sample_cache"]["manifest"].endswith("_admission_manifest.json")
+    assert admitted_sample_paths(samples_dir) == []
+    manifest = load_admission_manifest(samples_dir)
+    entry = manifest["samples"][sample.trial_id]
+    assert entry["admitted"] is False
+    assert entry["saved"] is False
+
+
+def test_admitted_sample_paths_rejects_legacy_cache_without_manifest(tmp_path):
+    """Fine-tuning must not silently consume a pre-admission mixed cache."""
+    (tmp_path / "legacy.npz").write_bytes(b"not a real sample")
+
+    with pytest.raises(FileNotFoundError, match="Admitted-only cache manifest"):
+        admitted_sample_paths(tmp_path)
