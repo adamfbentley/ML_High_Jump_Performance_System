@@ -181,51 +181,43 @@ apparently stationary final segment were tested only through takeoff-window
 derivatives. Automatic focused crops and wider windows failed the gates. Manual
 visual crops around the actual stationary plant/takeoff/bar-clearance windows
 do improve pose evidence: pose validity is 81-84 %, takeoff-window validity is
-78-100 %, and contact is detected. However, both still fail anchor review and
-produce implausible translational metrics under the current pipeline: derived
-horizontal takeoff velocity is near zero and takeoff angle is outside the gate.
-A full-video handheld/ROI diagnostic is also implausible.
+78-100 %, and contact is detected.
 
-Conclusion: do not include these two clips in the admitted sample cache under
-the current pipeline. They are useful for overlay/relative technique review, but
-not for training-grade translational samples.
+Refreshed 2026-06-13 after the heel/forefoot contact and windowed-apex fixes:
+one manual takeoff-window derivative now passes the implemented report gates
+and saves as `training_grade`; the other still rejects. The rejected clip's best
+trim/ROI sweep improves pose and sometimes anchor review, but remains below the
+38° high-jump takeoff-angle floor or fails anchor/velocity/scale gates.
 
-**Root-cause analysis (2026-06-04):**
+Conclusion: the admitted derivative is usable only as experimental
+takeoff-window evidence. It is not a full run-up sample, not independent data,
+and does not unblock optimiser claims. The rejected derivative remains useful
+for overlay/relative technique review only.
 
-Three independent failures confirmed by inspection of all crop variants and
+**Root-cause analysis (2026-06-04; refreshed 2026-06-13):**
+
+Remaining risks/failure modes confirmed by inspection of the crop variants and
 arithmetic verification against report data:
 
-1. Camera geometry — structural, not fixable by code. The run-up direction
-   for these clips has a large depth (Z) component relative to the camera.
-   The 2D X coordinate barely changes as the athlete approaches; derived
-   horizontal velocity is near zero (0.06–0.13 m/s) across all crop variants.
-   The full-frame handheld result gives vh=5.91 only because the panning
-   camera during the approach adds apparent X displacement. Once the panning
-   frames are excluded (derivative crops), vh collapses. A monocular camera
-   without a scene anchor cannot recover depth-direction velocity. This camera
-   angle (looking approximately along the run-up) is fundamentally different
-   from the side-on setup that works for the admitted Athlete A_stationary_footage
-   clips (vh 3.57–4.09 m/s from X displacement).
+1. Camera geometry remains the main structural risk. The run-up direction in
+   these clips has a large depth component relative to the camera, so monocular
+   X displacement can understate true approach velocity unless the final
+   takeoff window happens to contain enough side-on motion. One manually
+   reviewed derivative now passes, but this does not generalise to the full
+   panned-run-up clips.
 
-2. Global peak-CoM frame misidentification — fixable in code (deferred). The
-   pipeline uses `argmax(com_pos[:,1])` over the whole clip to identify the
-   flight apex. When the clip includes approach strides and the constant-mpp
-   calibration overestimates early-approach positions (athlete further from
-   camera → same mpp as at takeoff → inflated Y), the approach stride CoM Y
-   meets or exceeds the flight peak Y. This causes `peak_com_frame ≤
-   candidate_frame` and the anchor check fails even when the vy-based arithmetic
-   would otherwise pass. Deferred fix: replace the global argmax with a windowed
-   search bounded below by `argmax(vy)`. This fix has merit for all clips, not
-   just this footage. It must NOT be motivated by trying to admit these clips,
-   because camera geometry (issue 1) blocks admission regardless.
+2. Global peak-CoM frame misidentification was fixable and is now fixed in
+   code: `_windowed_peak_com_frame` keeps the global CoM apex when physically
+   consistent, but searches after the vy peak when early approach-stride Y
+   contamination wins the global argmax.
 
 3. Landing contacts selected as toe-off — consequence of issues 1 and 2. The
    derivative clips start at or after the actual toe-off moment, so no pre-peak
    approach contact is visible. The pre-peak filter in `select_takeoff_frame_
    details` cannot reject landing contacts because either there are no pre-peak
-   contacts (empty filter result) or the peak_com_frame is wrong (issue 2).
-   Contact intervals 7 in an 81-frame clip and takeoff at the last frame confirm
-   the pipeline is selecting mat-bounce landing contacts.
+   contacts (empty filter result) or the peak_com_frame is wrong. This still
+   appears in the rejected manual derivative, where the selected contact lands
+   at the end of the clip.
 
 Admission gate behaviour is correct — the gates correctly reject clips where
 translational physics cannot be validated from the available geometry.

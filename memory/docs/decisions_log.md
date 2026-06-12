@@ -188,9 +188,18 @@
   earlier controls, so the focused derivative is no longer needed for the newer
   trio.
 - Two newer panned-run-up/takeoff-stationary clips were tested through automatic,
-  wider, and manual visual takeoff-window derivatives. Manual crops include the
-  actual plant/takeoff/bar-clearance window and produce strong pose/contact
-  evidence, but both fail anchor review with near-zero derived horizontal
-  takeoff velocity and out-of-gate takeoff angles. Do not add them to the
-  admitted sample cache under the current pipeline; keep them for overlay and
+  wider, and manual visual takeoff-window derivatives. Refresh on 2026-06-13:
+  after heel/forefoot contact and windowed-apex fixes, one manual
+  takeoff-window derivative passes the implemented gates and is cached as
+  `training_grade`; the other remains rejected after trim/ROI sweeps because
+  anchor/velocity/angle gates do not agree. Treat the admitted derivative as
+  experimental takeoff-window evidence only, not a full run-up sample or an
+  optimiser-claim unblocker. Keep the rejected derivative for overlay and
   relative technique review only.
+- Stable takeoff-window solver implemented (2026-06-13). New experimental
+  `scripts/analyze_stable_takeoff_window.py` consumes a trimmed stable-window
+  clip and one manual apparatus-anchor JSON, solves camera pose from
+  bar/upright geometry, and fits post-toe-off 3D CoM projectile motion under
+  gravity. This is the intended path for extracting meaningful takeoff physics
+  from clips whose run-up was panned but whose final plant/takeoff window is
+  stable. Outputs are explicitly `takeoff_window_only`.

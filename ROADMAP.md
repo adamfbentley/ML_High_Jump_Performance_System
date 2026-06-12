@@ -644,17 +644,26 @@ whole-clip ROI plus the heel/forefoot contact fix admits the newer trio
 directly. This still does not unblock optimiser claims without a larger
 held-out stationary session.
 
-**Takeoff-stationary clips (2026-06-03):** two additional clips where the camera
-pans during run-up but appears stationary near the last steps/takeoff were
-tested as takeoff-focus derivatives only. Automatic focused crops and wider
-windows failed the gates. Manual visual crops around the actual stationary
-plant/takeoff/bar-clearance windows produced strong pose visibility (81-84 %,
-window 78-100 %) and detected contacts, but still failed anchor review: derived
-horizontal takeoff velocity collapsed near zero and takeoff angles were outside
-the admission gate. Full-video handheld/ROI checks are also implausible. Do not
-add these two to the admitted sample cache under the current pipeline. They are
-useful for overlay/relative technique review, but not for training-grade
-translational samples.
+**Takeoff-stationary clips (2026-06-03; refreshed 2026-06-13):** two additional
+clips where the camera pans during run-up but appears stationary near the last
+steps/takeoff were tested as takeoff-focus derivatives only. Automatic focused
+crops and wider windows failed the gates. Manual visual crops around the actual
+stationary plant/takeoff/bar-clearance windows produced strong pose visibility
+and detected contacts. After the foot-contact and windowed-apex fixes, one
+manual takeoff-window derivative now passes the implemented report gates; the
+other still rejects (anchor/velocity/angle failure, with trim/ROI sweeps still
+below the high-jump angle gate). Treat the admitted derivative as experimental
+takeoff-window evidence only, not a full run-up sample, not independent data,
+and not an optimiser-claim unblocker.
+
+**Stable takeoff-window physics path (2026-06-13):** implemented
+`scripts/analyze_stable_takeoff_window.py` as an experimental solver for the
+physics-visible part of panned-run-up clips. It consumes a trimmed stable-window
+video plus one manual apparatus-anchor JSON, solves a camera pose from bar/upright
+geometry, fits a post-toe-off 3D CoM projectile under gravity, and reports
+`takeoff_window_only` physics with focal-length sensitivity. Synthetic tests
+verify recovery of known launch velocity. This is the right path for extracting
+meaningful takeoff physics without claiming full run-up recovery.
 
 ### Phase 11 — Validation and Paper
 

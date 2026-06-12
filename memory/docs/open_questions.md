@@ -53,10 +53,11 @@ Updated 2026-06-13 after stationary foot-contact verification.
   subset.
 - Is one tripod side-view sufficient for the run-up direction velocity, or
   do we need an end-of-runway camera to capture the approach-direction
-  component that side-view projects away? The Athlete A_takeoff-stationary
-  clips (camera pointed roughly along the runway, not side-on) proved this
-  matters: vh collapsed to near zero because the run-up is in the depth
-  direction, which monocular cannot recover.
+  component that side-view projects away? The takeoff-stationary clips show
+  this remains placement-sensitive: one manually cropped final-window
+  derivative now passes gates, while the other still fails because the
+  available 2D motion/angle evidence does not support training-grade
+  translational physics.
 - Are there any panned clips worth retaining for *relative* analysis (stride
   rhythm, joint angles, body alignment) even though they cannot give
   training-grade translational metrics?

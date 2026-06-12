@@ -50,6 +50,14 @@ rg -n "stationary|stationary_camera|Phase 10" memory ROADMAP.md
     --roi-crop on \
     --save-samples <ignored-samples-dir>
 
+# Experimental stable takeoff-window physics from a panned-run-up clip
+.venv/Scripts/python.exe scripts/analyze_stable_takeoff_window.py \
+    --video "<stable-window-derivative.mp4>" \
+    --anchor-json "<manual-apparatus-anchors.json>" \
+    --bar-height 1.75 \
+    --roi-crop on \
+    --output data/results/stationary_validation/stable_takeoff_window_v1.json
+
 # Dry-run personal fine-tuning (loads the admitted cache, applies guardrails)
 .venv/Scripts/python.exe scripts/finetune_personal.py \
     --samples-dir <ignored-samples-dir> --dry-run
@@ -102,9 +110,10 @@ Stationary pilot outcome (5 clips, 2 captures, explicitly confirmed fixed camera
   remains useful for overlay/diagnostic rescue, but it is no longer required to
   admit newer clip 3. Whole-clip ROI plus foot-contact detection admits the
   newer trio directly.
-- Panned-run-up clips with stationary final steps were tested manually; pose and
-  contact are good, but translational gates fail. Keep them out of the admitted
-  cache unless a future method passes the same anchor/velocity/angle gates.
+- Panned-run-up clips with stationary final steps: current code rescues one
+  manual takeoff-window derivative as `training_grade`; the other remains
+  rejected. Treat the admitted derivative as experimental takeoff-window data
+  only, not a full run-up sample or independent attempt for optimiser claims.
 
 The analyser now caches only `training_grade` clips when `--save-samples` is
 supplied, records every decision in ignored `_admission_manifest.json`, and
