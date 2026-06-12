@@ -60,7 +60,7 @@ rg -n "stationary|stationary_camera|Phase 10" memory ROADMAP.md
 
 ## Current phase (June 2026)
 
-**Phases 9a-9e SHIPPED. Stationary admission hardening is complete and two
+**Phases 9a-9e SHIPPED. Stationary admission hardening is complete and all three
 newer stationary clips pass the implemented report gates. Phase 10 remains
 blocked pending a larger fixed-camera session with a held-out subset.**
 
@@ -74,6 +74,9 @@ Key pipeline additions shipped 2026-06-03:
   validates (a) vy ≥ 2.0 m/s and peak follows, (b) frame lead ≤ 2·t_apex·fps.
   Rejects approach-stride false detections. Both `kinematics_grade` and
   `training_grade` require the published anchor-review result.
+- Foot-ground contact now keys on heel/forefoot landmarks rather than the ankle
+  joint. This fixes plantarflexed toe-off cases where the forefoot is planted
+  but the malleolus never enters the 5 cm ground band.
 - `--roi-crop on` (off by default): two-pass athlete-crop. Pass 1 locates the
   athlete on the full frame; pass 2 re-detects on the crop and remaps 2D landmarks
   back to full-frame normalised coords via `remap_normalized_to_full_frame` (pure,
@@ -88,13 +91,20 @@ Key pipeline additions shipped 2026-06-03:
 
 Stationary pilot outcome (5 clips, 2 captures, explicitly confirmed fixed camera):
 
-- 2/3 newer landscape clips: **training_grade = True**. Takeoff angles 41–43°,
-  vh 3.57–3.60 m/s, window pose validity 70–73 %, contact + anchor review passed.
-- 1/3 newer clip: fails — ankle contact detection failure only; physics in-range.
+- 3/3 newer landscape clips: **training_grade = True**. Takeoff angles
+  40.5–42.2°, vh 3.65–4.11 m/s, window pose validity 61.7–73.3 %, contact +
+  anchor review passed.
 - Both earlier controls: not path-forward (approach-stride anchor, high spread).
 - Raw pre-calibration proportion check: lower-limb shank/thigh estimates are
   credible across the local clips; arm length remains underestimated and must
   not be used as a scale anchor. This does not validate absolute scene scale.
+- Current-footage fallback: the takeoff-focused derivative path was tested and
+  remains useful for overlay/diagnostic rescue, but it is no longer required to
+  admit newer clip 3. Whole-clip ROI plus foot-contact detection admits the
+  newer trio directly.
+- Panned-run-up clips with stationary final steps were tested manually; pose and
+  contact are good, but translational gates fail. Keep them out of the admitted
+  cache unless a future method passes the same anchor/velocity/angle gates.
 
 The analyser now caches only `training_grade` clips when `--save-samples` is
 supplied, records every decision in ignored `_admission_manifest.json`, and

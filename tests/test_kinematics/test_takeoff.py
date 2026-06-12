@@ -14,6 +14,7 @@ from scripts.analyze_jump_video import (
     _calibration_source,
     _quality_block,
     _validate_takeoff_anchor,
+    _windowed_peak_com_frame,
     _write_json_report,
     generate_report,
     parse_bar_height,
@@ -258,14 +259,23 @@ def _make_video_sample_for_takeoff_frame_test(
     velocity_spike_frame: int,
     true_takeoff_frame: int,
 ) -> BiomechanicalSample:
-    """Synthetic calibrated video sample with ankle Y in metres."""
+    """Synthetic calibrated video sample with foot landmark Y in metres.
+
+    Contact is expressed via the heel/forefoot landmarks (the real ground-
+    contact surfaces), with the ankle held elevated even during contact to
+    model the plantarflexed toe-off pose — the case an ankle-only detector
+    misses.  Foot landmarks: ankles 27/28, heels 29/30, toes 31/32.
+    """
     n = 30
     fps = 100.0
     pose_3d = np.zeros((n, 33, 3), dtype=float)
-    pose_3d[:, 27, 1] = 0.25
-    pose_3d[:, 28, 1] = 0.25
+    # All foot landmarks start off the ground.
+    for _idx in (27, 28, 29, 30, 31, 32):
+        pose_3d[:, _idx, 1] = 0.25
     if contact_slice is not None:
-        pose_3d[contact_slice, 28, 1] = 0.02
+        # Right-foot heel + forefoot on the ground; ankle stays elevated.
+        pose_3d[contact_slice, 30, 1] = 0.02  # right heel
+        pose_3d[contact_slice, 32, 1] = 0.02  # right forefoot
 
     com_position = np.zeros((n, 3), dtype=float)
     com_position[:, 1] = np.linspace(1.0, 1.8, n)
@@ -542,6 +552,75 @@ def test_select_takeoff_frame_details_anchor_review_passes_for_valid_contact():
     assert anchor_ok is True
 
 
+def test_windowed_peak_com_frame_keeps_consistent_global_peak():
+    """When the global CoM peak follows the vy peak, keep the global apex."""
+    com_pos = np.zeros((12, 3), dtype=float)
+    com_pos[:, 1] = np.linspace(1.0, 1.6, 12)
+    com_vel = np.zeros((12, 3), dtype=float)
+    com_vel[5, 1] = 3.0
+    assert _windowed_peak_com_frame(com_pos, com_vel) == 11
+
+
+def test_windowed_peak_com_frame_recovers_after_vy_peak():
+    """Approach-stride Y contamination before vy peak should not define flight apex."""
+    com_pos = np.zeros((12, 3), dtype=float)
+    com_pos[:, 1] = 1.0
+    com_pos[2, 1] = 2.0   # contaminated early approach peak
+    com_pos[9, 1] = 1.8   # plausible flight peak after launch velocity peak
+    com_vel = np.zeros((12, 3), dtype=float)
+    com_vel[5, 1] = 3.0
+    assert _windowed_peak_com_frame(com_pos, com_vel) == 9
+
+
+def test_select_takeoff_frame_details_detects_plantarflexed_toeoff_contact():
+    """Forefoot-down / ankle-elevated plant is detected (regression).
+
+    Models the stationary clip-3 failure mode: at toe-off the malleolus
+    (ankle, idx 27/28) stays well above the support band while the heel and
+    forefoot load the ground.  An ankle-height detector finds no contact; the
+    foot-landmark detector must register the plant and pass the anchor review.
+    """
+    n, fps = 30, 100.0
+    pose_3d = np.zeros((n, 33, 3), dtype=float)
+    for idx in (27, 28, 29, 30, 31, 32):
+        pose_3d[:, idx, 1] = 0.30
+    # Ankle never enters the 5 cm ground band even during the plant.
+    pose_3d[:, 27, 1] = 0.12
+    pose_3d[:, 28, 1] = 0.12
+    contact = slice(8, 12)
+    pose_3d[contact, 30, 1] = 0.02  # right heel on ground
+    pose_3d[contact, 32, 1] = 0.02  # right forefoot on ground
+
+    com_position = np.zeros((n, 3), dtype=float)
+    com_position[:, 1] = np.linspace(1.0, 1.8, n)
+    com_velocity = np.zeros((n, 3), dtype=float)
+    com_velocity[:, 0] = 3.0
+    com_velocity[:, 1] = 0.5
+    com_velocity[11, 1] = 3.4
+    com_velocity[20, 1] = 20.0
+    grf = np.zeros((n, 3), dtype=float)
+    grf[:, 1] = 65.0 * 9.81
+    sample = BiomechanicalSample(
+        dataset_name="unit_test",
+        trial_id="plantarflexed_toeoff",
+        subject=SubjectInfo(subject_id="athlete", body_mass_kg=65.0, height_m=1.75),
+        movement_type=MovementType.HIGH_JUMP,
+        fps=fps,
+        com_position=com_position,
+        com_velocity=com_velocity,
+        grf=grf,
+        pose_3d=pose_3d,
+    )
+    frame, detected, count, anchor_ok = select_takeoff_frame_details(
+        sample, fallback_frame=20
+    )
+    assert detected is True
+    assert count >= 1
+    # Toe-off = last frame of the ground-contact interval (slice end is exclusive).
+    assert frame == 11
+    assert anchor_ok is True
+
+
 def test_select_takeoff_frame_details_no_contact_flags_anchor_failed():
     """No contact detected → anchor_review_passed=False (argmax fallback is not safe)."""
     sample = _make_video_sample_for_takeoff_frame_test(
@@ -556,6 +635,70 @@ def test_select_takeoff_frame_details_no_contact_flags_anchor_failed():
     assert anchor_ok is False
 
 
+def _make_no_contact_anchor_fail_sample() -> BiomechanicalSample:
+    """Sample where no contacts AND velocity-based anchor fails.
+
+    The CoM peaks at frame 5 (parabolic, immediately descending after).
+    The highest vy is also at frame 5 (the velocity spike).
+    _windowed_peak_com_frame: vy_peak=5, global_peak=5 → returns 5.
+    _validate_takeoff_anchor(5, 5, ...): peak_com_frame(5) <= candidate(5) → False.
+    """
+    n, fps = 30, 100.0
+    pose_3d = np.zeros((n, 33, 3), dtype=float)
+    # All foot landmarks off the ground → no contacts detected.
+    for _idx in (27, 28, 29, 30, 31, 32):
+        pose_3d[:, _idx, 1] = 0.25
+
+    # CoM peaks at frame 5 then descends
+    t = np.arange(n) / fps
+    peak_t = 5 / fps
+    g = 9.81
+    com_position = np.zeros((n, 3), dtype=float)
+    com_position[:, 1] = np.maximum(1.0, 1.2 - 0.5 * g * (t - peak_t) ** 2)
+
+    com_velocity = np.zeros((n, 3), dtype=float)
+    com_velocity[:, 0] = 3.0
+    com_velocity[:, 1] = 0.5
+    com_velocity[5, 1] = 3.5  # vy spike at frame 5 (same as the CoM peak)
+
+    grf = np.zeros((n, 3), dtype=float)
+    grf[:, 1] = 65.0 * 9.81
+    return BiomechanicalSample(
+        dataset_name="unit_test",
+        trial_id="anchor_fail",
+        subject=SubjectInfo(subject_id="athlete", body_mass_kg=65.0, height_m=1.75),
+        movement_type=MovementType.HIGH_JUMP,
+        fps=fps,
+        com_position=com_position,
+        com_velocity=com_velocity,
+        grf=grf,
+        pose_3d=pose_3d,
+    )
+
+
+def test_select_takeoff_frame_details_no_contact_velocity_anchor_fails():
+    """No contact AND velocity anchor fails when CoM peaks at same frame as vy peak."""
+    sample = _make_no_contact_anchor_fail_sample()
+    # fallback = argmax(vy) = 5 (the spike)
+    _frame, detected, _count, anchor_ok = select_takeoff_frame_details(
+        sample, fallback_frame=5
+    )
+    assert detected is False
+    assert anchor_ok is False  # peak_com_frame == candidate_frame → fails
+
+
+def test_generate_report_no_contact_velocity_anchor_fails_still_rejects():
+    """When no contact AND velocity anchor fails, anchor_review_failed + no_contact added."""
+    sample = _make_no_contact_anchor_fail_sample()
+    # Use fallback_frame=5 so argmax(vy) selects the co-located peak frame
+    # Force argmax(vy)=5 by making com_velocity[5,1] the highest
+    report = generate_report(sample, pinn_grf=None)
+    assert report["quality"]["takeoff_anchor_review_passed"] is False
+    failures = report["quality"]["training_grade_failures"]
+    assert "takeoff_anchor_review_failed" in failures
+    assert "no_contact_interval" in failures
+
+
 def test_generate_report_no_contact_includes_anchor_review_failure():
     """When no contact is detected, report.quality should include anchor review failure."""
     sample = _make_video_sample_for_takeoff_frame_test(
@@ -566,6 +709,7 @@ def test_generate_report_no_contact_includes_anchor_review_failure():
     report = generate_report(sample, pinn_grf=None)
     assert report["quality"]["takeoff_anchor_review_passed"] is False
     assert "takeoff_anchor_review_failed" in report["quality"]["training_grade_failures"]
+    assert "no_contact_interval" in report["quality"]["training_grade_failures"]
 
 
 def test_generate_report_valid_contact_anchor_review_passed():

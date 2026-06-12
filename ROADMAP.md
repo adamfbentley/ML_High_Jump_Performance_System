@@ -350,7 +350,7 @@ After the 9a/9b fixes, **0/45** reports have negative takeoff angles or velociti
 
 ---
 
-## Current State (3 June 2026)
+## Current State (13 June 2026)
 
 | Area | Status |
 |---|---|
@@ -363,7 +363,7 @@ After the 9a/9b fixes, **0/45** reports have negative takeoff angles or velociti
 | Differentiable optimiser + sensitivity analysis | ✅ Complete and tested |
 | Video analysis end-to-end pipeline | ✅ Complete — stationary-footage tooling added June 2026 |
 | Athlete priority metrics (Athlete A alignment) | ✅ Implemented |
-| Test suite | ✅ 272 non-PINN / 277 total tests passing |
+| Test suite | ✅ 285 total tests passing |
 | Public datasets downloaded (Zenodo CMJ, CoD, DVJ) | ✅ Done |
 | PINN pre-training run (3000 epochs) | ✅ Done — `final_model.pth` saved |
 | Athlete A's 45 panned videos processed | ✅ Re-processed Phase 9a/9b with 45 cached samples |
@@ -372,9 +372,9 @@ After the 9a/9b fixes, **0/45** reports have negative takeoff angles or velociti
 | Single-camera scale calibration on panned footage | ❌ Closed — gravity-mpp and egomotion cannot reach training-grade on handheld clips |
 | Hand-label evaluation infrastructure | ✅ Phase 9c — truth evaluator, label tool, 5 clips labelled |
 | Gravity-mpp validation module | ✅ Phase 9e — validation-only; failed on handheld as predicted |
-| Stationary-footage admission tooling | ✅ June 2026 — explicit fixed-camera confirmation, `--roi-crop on`, windowed pose-validity gate, strengthened anchor review, admitted-only cache, and local manifest all shipped and tested |
+| Stationary-footage admission tooling | ✅ June 2026 — explicit fixed-camera confirmation, heel/forefoot contact detection, `--roi-crop on`, windowed pose-validity gate, strengthened anchor review, admitted-only cache, and local manifest all shipped and tested |
 | Stationary capture policy | ✅ Locked — required for training-grade physics, Phase 10, and optimiser claims |
-| Stationary pilot validation | 🟦 Promising — 2/3 newer clips pass implemented report gates; larger 60 fps session still required |
+| Stationary pilot validation | 🟦 Promising — 3/3 newer clips pass implemented report gates; larger 60 fps session still required |
 | AddBiomechanics dataset downloaded | ⬜ Pending (highest-quality GRF pre-training data) |
 | Personal data fine-tuning loop | ⬜ Blocked — collect a larger stationary session and reserve a held-out subset |
 | Optimiser outputs | ⬜ Stale — do not refresh until larger stationary session validated |
@@ -510,8 +510,8 @@ selecting an approach stride well before toe-off after later tracking drops out.
 
 **Update 3 June 2026 — admission tooling shipped:**
 
-Four initial gaps closed; the subsequent cache-boundary hardening brings the
-suite to 272/272 non-PINN tests passing.
+Four initial gaps closed; the subsequent cache-boundary hardening brought the
+suite to 275/275 non-PINN tests passing at that point.
 
 1. **`--capture-mode stationary --stationary-camera-confirmed`**
    (scripts/analyze_jump_video.py): an explicit operator review that the camera
@@ -566,8 +566,26 @@ capture shoulders during flight at this camera distance (athlete ≈ 10–16 % o
 frame height). The 20 % relative margin is insufficient when the athlete rises
 8–10 % of frame height above the approach position at takeoff.
 
-**Current blocker:** pose coverage at this camera distance. All physics gates
-pass for the newer trio. Recapture protocol:
+**Update 13 June 2026 — foot-contact correction verified:**
+
+The remaining newer-trio failure was not a relaxed-gate problem. The detector
+was using the ankle/malleolus height for ground contact, but clip 3 shows a
+plantarflexed toe-off: heel/forefoot landmarks enter the 5 cm ground band while
+the ankle remains above it. `select_takeoff_frame_details` now keys contact on
+the lowest heel/forefoot marker per foot, with ankle fallback only for reduced
+skeletons. The `no_contact_interval` gate remains contact-required; argmax(vy)
+fallback is still report-only and not admission-safe.
+
+Fresh full-pipeline verification with `--capture-mode stationary
+--stationary-camera-confirmed --roi-crop on --bar-height 1.75` admits all three
+newer clips as `training_grade=True`. Takeoff angles are 40.5-42.2°, takeoff
+horizontal velocity is 3.65-4.11 m/s, windowed pose validity is 61.7-73.3 %,
+and all three pass contact + anchor review. The two earlier control clips still
+reject correctly (anchor review and angle out of range, plus pose/scale
+failures as applicable), and no control sample is cached.
+
+**Current blocker:** sample size and held-out validation, not admission for the
+newer trio. Recapture protocol:
 - Move camera closer so athlete ≥ 25 % of frame height.
 - Shoot at 60 fps (improves contact detection margin).
 - Keep landscape orientation; full approach through landing in frame.
@@ -613,6 +631,30 @@ within 2 % of taped measurements, while 2D projected estimates are within 8 %.
 Arm length remains underestimated by roughly 15-22 %, so arm landmarks should
 not be used as a calibration anchor yet. This supports the lower-limb
 anatomical branch but does not validate absolute scene scale or run-up velocity.
+
+**Current-footage rescue pass (2026-06-03; superseded for the newer trio on
+2026-06-13):** since more stationary capture was not available, a
+takeoff-focused rescue path was tested. `--roi-crop takeoff` adds a tighter
+pass-2 crop around the estimated flight/takeoff window, and
+`scripts/create_takeoff_focus_clips.py` creates ignored static-crop derivative
+clips around that window. Direct takeoff ROI is not universally better, so it
+is not the new default. The focused derivative route remains useful for
+overlay/diagnostic rescue, but it is no longer required to admit newer clip 3:
+whole-clip ROI plus the heel/forefoot contact fix admits the newer trio
+directly. This still does not unblock optimiser claims without a larger
+held-out stationary session.
+
+**Takeoff-stationary clips (2026-06-03):** two additional clips where the camera
+pans during run-up but appears stationary near the last steps/takeoff were
+tested as takeoff-focus derivatives only. Automatic focused crops and wider
+windows failed the gates. Manual visual crops around the actual stationary
+plant/takeoff/bar-clearance windows produced strong pose visibility (81-84 %,
+window 78-100 %) and detected contacts, but still failed anchor review: derived
+horizontal takeoff velocity collapsed near zero and takeoff angles were outside
+the admission gate. Full-video handheld/ROI checks are also implausible. Do not
+add these two to the admitted sample cache under the current pipeline. They are
+useful for overlay/relative technique review, but not for training-grade
+translational samples.
 
 ### Phase 11 — Validation and Paper
 

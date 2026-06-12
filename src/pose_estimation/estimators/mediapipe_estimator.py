@@ -168,6 +168,138 @@ def _aggregate_smoothed_crop(
     return x1, y1, x2, y2
 
 
+def _estimate_motion_apex_frame(
+    sequence: PoseSequence,
+    min_visibility: float = 0.3,
+) -> int | None:
+    """Estimate the flight apex frame from full-frame 2D hip landmarks.
+
+    Image y increases downward, so the minimum visible hip-centre y is the
+    highest body position. This is only used to choose a crop window; it is not
+    used for physics or report metrics.
+    """
+    candidates: list[tuple[int, float]] = []
+    for index, frame in enumerate(sequence.frames):
+        hips = frame.landmarks_2d[[23, 24]]
+        visible = hips[:, 2] >= min_visibility
+        if np.any(visible):
+            candidates.append((index, float(np.mean(hips[visible, 1]))))
+
+    if candidates:
+        return min(candidates, key=lambda item: item[1])[0]
+
+    # Fallback: if hips are unavailable, use the frame whose visible-landmark
+    # bbox reaches highest in the image.
+    fallback: list[tuple[int, float]] = []
+    for index, frame in enumerate(sequence.frames):
+        bb = _bbox_from_landmarks_2d(frame.landmarks_2d, min_visibility)
+        if bb is not None:
+            fallback.append((index, bb[1]))
+    if not fallback:
+        return None
+    return min(fallback, key=lambda item: item[1])[0]
+
+
+def _expand_crop_to_min_size(
+    bbox: tuple[float, float, float, float],
+    *,
+    min_width: float,
+    min_height: float,
+) -> tuple[float, float, float, float]:
+    """Expand a normalised bbox around its centre to a minimum size."""
+    x1, y1, x2, y2 = bbox
+    width = x2 - x1
+    height = y2 - y1
+    if width < min_width:
+        centre_x = (x1 + x2) / 2.0
+        half_width = min_width / 2.0
+        x1 = max(0.0, centre_x - half_width)
+        x2 = min(1.0, centre_x + half_width)
+        if x2 - x1 < min_width:
+            if x1 == 0.0:
+                x2 = min(1.0, min_width)
+            elif x2 == 1.0:
+                x1 = max(0.0, 1.0 - min_width)
+    if height < min_height:
+        centre_y = (y1 + y2) / 2.0
+        half_height = min_height / 2.0
+        y1 = max(0.0, centre_y - half_height)
+        y2 = min(1.0, centre_y + half_height)
+        if y2 - y1 < min_height:
+            if y1 == 0.0:
+                y2 = min(1.0, min_height)
+            elif y2 == 1.0:
+                y1 = max(0.0, 1.0 - min_height)
+    return x1, y1, x2, y2
+
+
+def _aggregate_takeoff_crop(
+    sequence: PoseSequence,
+    *,
+    pre_window_s: float = 1.2,
+    post_window_s: float = 0.7,
+    min_visibility: float = 0.3,
+) -> tuple[float, float, float, float] | None:
+    """Crop around the estimated takeoff/flight window, not the whole run-up.
+
+    The full-clip crop has to include the approach path, which can keep the
+    athlete small. For current stationary footage, the critical evidence is the
+    final stride, plant, takeoff, and early flight. We estimate the flight apex
+    from pass-1 landmarks, collect a generous time window around it, then expand
+    the crop upward so shoulders and flight extension are not clipped.
+    """
+    apex_frame = _estimate_motion_apex_frame(sequence, min_visibility=min_visibility)
+    if apex_frame is None:
+        return None
+
+    fps = sequence.fps if sequence.fps > 0 else 30.0
+    start = max(0, apex_frame - int(round(pre_window_s * fps)))
+    end = min(len(sequence.frames), apex_frame + int(round(post_window_s * fps)) + 1)
+
+    all_x: list[float] = []
+    all_y: list[float] = []
+    for frame in sequence.frames[start:end]:
+        bb = _bbox_from_landmarks_2d(frame.landmarks_2d, min_visibility)
+        if bb is not None:
+            all_x += [bb[0], bb[2]]
+            all_y += [bb[1], bb[3]]
+    if not all_x:
+        return None
+
+    x1, x2 = min(all_x), max(all_x)
+    y1, y2 = min(all_y), max(all_y)
+    width = x2 - x1
+    height = y2 - y1
+
+    # Horizontal margin keeps curve/run-up drift in frame. The larger upward
+    # margin protects shoulders and head during flight, which the whole-clip ROI
+    # previously risked trimming.
+    x_margin = max(width * 0.30, 0.08)
+    top_margin = max(height * 0.85, 0.14)
+    bottom_margin = max(height * 0.45, 0.08)
+    bbox = (
+        max(0.0, x1 - x_margin),
+        max(0.0, y1 - top_margin),
+        min(1.0, x2 + x_margin),
+        min(1.0, y2 + bottom_margin),
+    )
+    bbox = _expand_crop_to_min_size(bbox, min_width=0.22, min_height=0.35)
+    if (bbox[2] - bbox[0]) < 0.05 or (bbox[3] - bbox[1]) < 0.05:
+        return None
+    return bbox
+
+
+def _normalise_roi_crop_mode(roi_crop: bool | str) -> str:
+    """Map legacy bool and CLI string values to one crop mode."""
+    if isinstance(roi_crop, bool):
+        return "full" if roi_crop else "off"
+    if roi_crop == "on":
+        return "full"
+    if roi_crop in {"off", "full", "takeoff"}:
+        return roi_crop
+    raise ValueError(f"Unsupported ROI crop mode: {roi_crop!r}")
+
+
 class MediaPipeEstimator:
     """Wrapper around MediaPipe BlazePose for high jump video analysis.
 
@@ -220,38 +352,41 @@ class MediaPipeEstimator:
                     "See: https://ai.google.dev/edge/mediapipe/solutions/vision/pose_landmarker"
                 )
 
-    def process_video(self, video_path: str | Path, roi_crop: bool = False) -> PoseSequence:
+    def process_video(self, video_path: str | Path, roi_crop: bool | str = False) -> PoseSequence:
         """Run pose estimation on every frame of a video file.
 
         Uses the MediaPipe Tasks PoseLandmarker API (≥0.10.14).
 
-        When roi_crop=True, a two-pass strategy is used: pass 1 detects on the
-        full frame to locate the athlete, pass 2 re-detects on the cropped and
-        upscaled athlete region and remaps landmarks back to full-frame normalised
-        coordinates. This improves detection when the athlete occupies a small
-        fraction of the frame (e.g. far-back stationary camera).
+        When roi_crop=True/"on"/"full", a two-pass strategy locates the athlete
+        across the whole clip. When roi_crop="takeoff", pass 2 uses a tighter
+        crop around the estimated takeoff/flight window.
 
         Args:
             video_path: Path to the video file (mp4, mov, etc.)
-            roi_crop: When True, use the two-pass ROI crop strategy.
+            roi_crop: False/"off", True/"on"/"full", or "takeoff".
 
         Returns:
             PoseSequence with one frame per decoded source frame. Undetected
             frames are filled with zero-visibility placeholders. fps is derived
             from median decoded timestamp spacing (not container average).
         """
-        if not roi_crop:
+        crop_mode = _normalise_roi_crop_mode(roi_crop)
+        if crop_mode == "off":
             return self._run_pose_detection(Path(video_path), crop_bbox_norm=None)
 
         # Two-pass: coarse full-frame pass → stable crop bbox → re-detect on crop
         pass1 = self._run_pose_detection(Path(video_path), crop_bbox_norm=None)
-        bbox_norm = _aggregate_smoothed_crop(pass1)
+        bbox_norm = (
+            _aggregate_takeoff_crop(pass1)
+            if crop_mode == "takeoff"
+            else _aggregate_smoothed_crop(pass1)
+        )
         if bbox_norm is None:
             logger.warning("ROI crop pass 1 yielded no landmarks; returning full-frame result")
             return pass1
         logger.info(
-            "ROI crop: pass-2 bbox (normalised) x=[%.3f,%.3f] y=[%.3f,%.3f]",
-            bbox_norm[0], bbox_norm[2], bbox_norm[1], bbox_norm[3],
+            "ROI crop (%s): pass-2 bbox (normalised) x=[%.3f,%.3f] y=[%.3f,%.3f]",
+            crop_mode, bbox_norm[0], bbox_norm[2], bbox_norm[1], bbox_norm[3],
         )
         return self._run_pose_detection(Path(video_path), crop_bbox_norm=bbox_norm)
 

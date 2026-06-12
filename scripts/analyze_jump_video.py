@@ -137,7 +137,7 @@ def _write_json_report(path: Path, report: object) -> None:
 
 
 def extract_poses(
-    video_path: Path, use_roi_crop: bool = False
+    video_path: Path, use_roi_crop: bool | str = False
 ) -> tuple[np.ndarray, np.ndarray, float, int, int]:
     """Run MediaPipe BlazePose on a video and return 2D + 3D landmarks.
 
@@ -148,10 +148,11 @@ def extract_poses(
         width: Video frame width in pixels.
         height: Video frame height in pixels.
 
-    When use_roi_crop=True, a two-pass athlete-crop strategy is used to improve
-    MediaPipe detection when the athlete occupies a small fraction of the frame.
-    Landmarks are remapped to full-frame normalised coordinates so downstream
-    scale_calibration (which uses image_width/height projections) is unaffected.
+    When use_roi_crop=True/"on"/"full", a two-pass athlete-crop strategy is used
+    across the whole clip. When use_roi_crop="takeoff", pass 2 focuses on the
+    estimated takeoff/flight window. Landmarks are remapped to full-frame
+    normalised coordinates so downstream scale_calibration (which uses
+    image_width/height projections) is unaffected.
     """
     estimator = MediaPipeEstimator(model_complexity=2)
     sequence = estimator.process_video(video_path, roi_crop=use_roi_crop)
@@ -368,6 +369,41 @@ def _quality_block(
 # ── Takeoff anchor validation ──────────────────────────────────────────
 
 
+def _windowed_peak_com_frame(
+    com_pos: np.ndarray,
+    com_vel: np.ndarray,
+) -> int:
+    """Find the flight-apex CoM frame using the vy-peak as a lower bound.
+
+    The global argmax of com_pos[:,1] can land on an approach stride when the
+    constant-mpp calibration inflates early-approach Y positions (athlete
+    further from camera at that moment, so the same mpp over-scales those
+    frames).
+
+    Projectile physics requires the position peak to come AFTER the velocity
+    peak (you cannot be at maximum height before your upward velocity is zero).
+    If the global argmax returns a frame before argmax(vy), that signals
+    approach-stride contamination; we search for the peak only from
+    argmax(vy) onward.  If the global argmax is already consistent (i.e.
+    it comes after argmax(vy)), it is returned unchanged so this function
+    has no effect on well-tracked clips.
+    """
+    n_frames = com_pos.shape[0]
+    if n_frames == 0:
+        return 0
+    global_peak = int(np.argmax(com_pos[:, 1]))
+    if len(com_vel) == 0:
+        return global_peak
+    vy_peak = int(np.argmax(com_vel[:, 1]))
+    if global_peak >= vy_peak:
+        # Consistent with projectile physics — keep the global result.
+        return global_peak
+    # Global peak precedes velocity peak: approach-stride Y contamination.
+    # Restrict the search to [vy_peak, n_frames) where the flight peak must lie.
+    search_start = min(vy_peak, n_frames - 1)
+    return search_start + int(np.argmax(com_pos[search_start:, 1]))
+
+
 def _validate_takeoff_anchor(
     candidate_frame: int,
     peak_com_frame: int,
@@ -564,6 +600,30 @@ def run_pinn_inference(
 # ── Summary Report ─────────────────────────────────────────────────────
 
 
+# BlazePose foot landmarks per side: (heel, foot_index/toe).  The malleolus
+# (ankle, idx 27/28) sits well above the support surface and is plantarflexed
+# at toe-off, so an absolute ankle-height threshold systematically misses the
+# takeoff plant (the ankle never reaches the ground band even while the
+# forefoot is loaded).  The heel and forefoot are the actual ground-contact
+# surfaces; standard kinematic gait-event detection keys on these distal foot
+# markers rather than the ankle (e.g. Zeni et al. 2008; O'Connor et al. 2007).
+# We take the lowest of the two per foot as the foot-ground height.
+_LEFT_FOOT_CONTACT_LANDMARKS = (29, 31)   # left heel, left foot_index
+_RIGHT_FOOT_CONTACT_LANDMARKS = (30, 32)  # right heel, right foot_index
+
+
+def _foot_ground_height_m(pose_3d: np.ndarray, landmark_indices: tuple[int, ...]) -> np.ndarray:
+    """Per-frame foot-ground height (metres, Y-up) = lowest contact landmark.
+
+    Uses ``np.fmin`` so a NaN/placeholder in one landmark does not erase a
+    valid reading from the other.  Returns the Y series for one foot.
+    """
+    heights = np.asarray(pose_3d[:, landmark_indices[0], 1], dtype=float)
+    for idx in landmark_indices[1:]:
+        heights = np.fmin(heights, np.asarray(pose_3d[:, idx, 1], dtype=float))
+    return heights
+
+
 def select_takeoff_frame_details(
     sample: BiomechanicalSample,
     fallback_frame: int,
@@ -573,35 +633,61 @@ def select_takeoff_frame_details(
     Returns:
         (frame, contact_interval_detected, contact_count, takeoff_anchor_review_passed)
 
-    contact_interval_detected: True when at least one ankle-ground contact was
+    contact_interval_detected: True when at least one foot-ground contact was
         found.  The argmax(vy) fallback is used when False.
     takeoff_anchor_review_passed: True only when the selected frame passes
         _validate_takeoff_anchor — i.e. vy > 0, peak CoM follows, and the
         frame is not too early to be an approach stride.  Always False when no
         contact interval was detected (argmax fallback is not admission-safe).
 
+    Foot-ground contact is detected from the lowest of the heel/forefoot
+    landmarks per foot (see ``_foot_ground_height_m``), not the ankle joint,
+    which is elevated and plantarflexed at toe-off.  For reduced skeletons
+    without the full foot landmark set, the ankle is used as a fallback.
     `detect_ground_contacts` works in centimetres; video-pipeline pose landmarks
-    are calibrated in metres, so ankle trajectories are converted before use.
+    are calibrated in metres, so trajectories are converted before use.
     """
     if sample.pose_3d is None or sample.pose_3d.ndim != 3 or sample.pose_3d.shape[1] <= 28:
         return fallback_frame, False, 0, False
 
+    pose = sample.pose_3d
+    if pose.shape[1] > 32:
+        foot_groups = (_LEFT_FOOT_CONTACT_LANDMARKS, _RIGHT_FOOT_CONTACT_LANDMARKS)
+    else:
+        # Reduced skeleton: fall back to the ankle joints (legacy behaviour).
+        foot_groups = ((27,), (28,))
+
     contacts: list[tuple[int, int]] = []
-    for ankle_idx in (27, 28):
-        ankle_m = sample.pose_3d[:, ankle_idx, :3]
-        if ankle_m.shape[0] == 0 or not np.isfinite(ankle_m[:, 1]).any():
+    for group in foot_groups:
+        heights_m = _foot_ground_height_m(pose, group)
+        if heights_m.shape[0] == 0 or not np.isfinite(heights_m).any():
             continue
-        contacts.extend(detect_ground_contacts(ankle_m * 100.0, sample.fps))
+        # detect_ground_contacts only reads column 1; column 0/2 are unused but
+        # supplied so the (T, 3) contract is preserved.
+        traj_cm = np.zeros((heights_m.shape[0], 3), dtype=float)
+        traj_cm[:, 1] = heights_m * 100.0
+        contacts.extend(detect_ground_contacts(traj_cm, sample.fps))
+
+    # Resolve the flight-apex frame using the velocity-bounded windowed search.
+    # This prevents approach-stride Y-position peaks (inflated by constant-mpp
+    # calibration) from beating the true flight apex in the global argmax.
+    peak_com_frame = fallback_frame
+    if (
+        sample.com_position is not None
+        and len(sample.com_position) > 0
+        and sample.com_velocity is not None
+        and len(sample.com_velocity) > 0
+    ):
+        peak_com_frame = _windowed_peak_com_frame(sample.com_position, sample.com_velocity)
+    elif sample.com_position is not None and len(sample.com_position) > 0:
+        peak_com_frame = int(np.argmax(sample.com_position[:, 1]))
 
     if not contacts:
         return fallback_frame, False, 0, False
 
-    peak_com_frame = fallback_frame
-    if sample.com_position is not None and len(sample.com_position) > 0:
-        peak_com_frame = int(np.argmax(sample.com_position[:, 1]))
-        pre_peak_contacts = [contact for contact in contacts if contact[1] <= peak_com_frame]
-        if pre_peak_contacts:
-            contacts = pre_peak_contacts
+    pre_peak_contacts = [contact for contact in contacts if contact[1] <= peak_com_frame]
+    if pre_peak_contacts:
+        contacts = pre_peak_contacts
 
     contacts.sort(key=lambda contact: (contact[1], contact[0]))
     candidate_frame = int(contacts[-1][1])
@@ -781,7 +867,7 @@ def analyze_video(
     bar_height_m: float | None = None,
     capture_mode: str = "handheld",
     stationary_camera_confirmed: bool = False,
-    use_roi_crop: bool = False,
+    use_roi_crop: bool | str = False,
 ) -> dict:
     """Run the full analysis pipeline on a single video.
 
@@ -1121,12 +1207,11 @@ def main():
         ),
     )
     parser.add_argument(
-        "--roi-crop", choices=("on", "off"), default="off",
+        "--roi-crop", choices=("on", "off", "takeoff"), default="off",
         help=(
-            "Opt-in two-pass athlete ROI crop. Pass 1 detects on the full frame to "
-            "locate the athlete; pass 2 re-detects on the cropped region and remaps "
-            "landmarks to full-frame normalised coordinates. Use when the athlete "
-            "occupies a small fraction of the frame (e.g. far-back stationary camera)."
+            "Opt-in two-pass athlete ROI crop. 'on' uses a whole-clip athlete "
+            "crop; 'takeoff' focuses pass 2 on the estimated takeoff/flight "
+            "window. Both remap landmarks to full-frame normalised coordinates."
         ),
     )
     args = parser.parse_args()
@@ -1163,7 +1248,7 @@ def main():
                 bar_height_m=args.bar_height,
                 capture_mode=args.capture_mode,
                 stationary_camera_confirmed=args.stationary_camera_confirmed,
-                use_roi_crop=args.roi_crop == "on",
+                use_roi_crop=args.roi_crop,
             )
             all_reports.append(report)
 

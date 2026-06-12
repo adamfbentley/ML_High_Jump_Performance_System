@@ -171,3 +171,26 @@
   taped measurements and 2D projected checks are within 8 %. Arm length is
   underestimated by roughly 15-22 %, so do not use arm landmarks as a scale
   anchor. This does not validate absolute scene scale or run-up velocity.
+- Current-footage focusing tested. Direct `--roi-crop takeoff` is not a new
+  default because it helps one clip while hurting another. Static takeoff-focus
+  derivative clips were useful as an audited pre-fix fallback: whole-clip ROI
+  admitted newer clips 1-2, while the derivative rescued newer clip 3. Treat
+  this as historical/exploratory only; the derivative is not independent data
+  and does not unblock optimiser claims without held-out validation.
+- Foot-contact root cause fixed (2026-06-13). The remaining newer stationary
+  clip was failing because contact detection used the ankle/malleolus
+  landmark; in a plantarflexed toe-off the heel/forefoot can be planted while
+  the ankle stays above the 5 cm ground band. `select_takeoff_frame_details`
+  now detects contact from the lowest heel/forefoot marker per foot, with ankle
+  fallback only for reduced skeletons. The `no_contact_interval` gate remains
+  contact-required; argmax(vy) fallback is not admission-safe. Fresh
+  full-pipeline rerun admits 3/3 newer stationary clips and still rejects both
+  earlier controls, so the focused derivative is no longer needed for the newer
+  trio.
+- Two newer panned-run-up/takeoff-stationary clips were tested through automatic,
+  wider, and manual visual takeoff-window derivatives. Manual crops include the
+  actual plant/takeoff/bar-clearance window and produce strong pose/contact
+  evidence, but both fail anchor review with near-zero derived horizontal
+  takeoff velocity and out-of-gate takeoff angles. Do not add them to the
+  admitted sample cache under the current pipeline; keep them for overlay and
+  relative technique review only.

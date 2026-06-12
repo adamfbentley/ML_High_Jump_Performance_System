@@ -38,7 +38,7 @@ scripts/
   download_datasets.py
   render_pose_overlay.py
 
-tests/                  277 tests covering data, kinematics, pose calibration,
+tests/                  280 tests covering data, kinematics, pose calibration,
                         PINN physics, optimisation, and tooling
 tools/memory/           Local RAG build/query scripts for agent context
 memory/                 Tracked notes/plans/experiments plus ignored vector index
@@ -74,7 +74,9 @@ services_scaffold/      Parked deployment scaffolding, not part of research pipe
   athlete on the full frame; pass 2 re-detects on the cropped region.
   `remap_normalized_to_full_frame(landmarks_in_crop, bbox_norm)` maps
   crop-normalised coords back to full-frame normalised coords (pure function,
-  tested independently). The 3D world landmarks need no remap.
+  tested independently). `roi_crop="takeoff"` is an audited current-footage
+  fallback that estimates the flight/takeoff window from pass 1 and crops more
+  tightly around that region. The 3D world landmarks need no remap.
 - `scale_calibration.py`: Phase 9a calibration. When measured thigh/shank
   lengths are available, derives a single video-wide metres-per-pixel value
   from the 95th percentile of visible thigh/shank pixel projections, medianed
@@ -134,6 +136,8 @@ June 2026 additions to `scripts/analyze_jump_video.py`:
   or move credits the fixed camera as the scene-fixed horizontal reference and
   removes the `no_scene_fixed_horizontal_source` training gate.
 - `--roi-crop {on,off}`: opt-in two-pass ROI crop (default off).
+- `--roi-crop takeoff`: opt-in takeoff-window ROI crop. Useful for
+  current-footage rescue experiments, not a default admission path.
 
 ### Data Pipeline
 
@@ -216,6 +220,7 @@ be trusted.
 | `scripts/optimize_jump.py` | Generate optimiser/sensitivity outputs from reports. Currently stale pending metric validation. |
 | `scripts/download_datasets.py` | Print manual public-dataset download instructions. |
 | `scripts/render_pose_overlay.py` | Render pose overlays for inspection. |
+| `scripts/create_takeoff_focus_clips.py` | Create ignored, static-crop derivative clips around takeoff/flight for current-footage rescue experiments. |
 
 ## Local Agent Memory
 
@@ -252,15 +257,15 @@ Phases 9a-9e established the video-validation boundary:
 June 2026 — stationary-footage admission tooling shipped and validated:
 
 - explicit `--stationary-camera-confirmed`, takeoff-anchor review with a
-  2.0 m/s upward-launch floor, ROI crop, stricter key-joint pose metric, and
-  windowed pose-validity gate all added.
+  2.0 m/s upward-launch floor, heel/forefoot contact detection, ROI crop,
+  stricter key-joint pose metric, and windowed pose-validity gate all added.
 - Analyzer caching is training-grade-only, each decision is recorded in the
   ignored local admission manifest, and fine-tuning refuses legacy mixed
   sample directories.
-- Stationary pilot: **2/3 newer clips pass the implemented report gates**
+- Stationary pilot: **3/3 newer clips pass the implemented report gates**
   (training_grade True).
-  Takeoff angles 41–43°, vh 3.57–3.60 m/s, window pose validity 70–73 %.
-- Test suite: **272 non-PINN / 277 total passing**.
+  Takeoff angles 40.5–42.2°, vh 3.65–4.11 m/s, window pose validity 61.7–73.3 %.
+- Test suite: **285 total passing**.
 
 Phase 10 personal fine-tuning remains blocked pending a larger dedicated 60 fps
 session (8–12 attempts) and a held-out split. Do not refresh optimiser claims
@@ -279,7 +284,7 @@ Run the non-PINN suite with:
 .venv/Scripts/python.exe -m pytest tests/ --ignore=tests/test_pinn -q
 ```
 
-Current result: 272 non-PINN / 277 total passing. Test coverage includes data pipeline
+Current result: 285 total passing. Test coverage includes data pipeline
 roundtrips, scale calibration, kinematics, optimiser behaviour, pose skeleton
 utilities, landmark post-processing, parsers, physics-law checks, bbox remap
 round-trips, takeoff-anchor validation, windowed pose-validity logic, and

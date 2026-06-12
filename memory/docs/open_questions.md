@@ -1,6 +1,6 @@
 # Open Questions
 
-Updated 2026-06-03 after the stationary admission-tooling audit.
+Updated 2026-06-13 after stationary foot-contact verification.
 
 ## Closed
 
@@ -17,6 +17,13 @@ Updated 2026-06-03 after the stationary admission-tooling audit.
   footage is now the default requirement for training-grade physics and
   optimisation. Handheld footage remains useful for exploratory analysis,
   detector development, and relative technique review only.
+- ~~Should contact detection key on ankle height?~~ No. The ankle/malleolus
+  can remain above the ground band during plantarflexed toe-off. Use the lowest
+  heel/forefoot marker per foot, with ankle fallback only for reduced skeletons.
+- ~~Should peak-CoM anchor review use global `argmax(com_pos[:,1])` even when
+  it precedes the launch-velocity peak?~~ No. `_windowed_peak_com_frame`
+  keeps the global CoM apex when physically consistent, but searches after the
+  vy peak when early approach-stride Y contamination wins the global argmax.
 
 ## Also closed (2026-05-05)
 
@@ -41,11 +48,15 @@ Updated 2026-06-03 after the stationary admission-tooling audit.
   CoM results with the BMS PhD student?
 - Do the available stationary sets' camera placements provide
   enough approach-direction coverage for training-grade takeoff velocity?
-  Two newer clips pass the implemented report gates, but collect a closer
-  60 fps session before personal fine-tuning.
+  The newer trio now passes the implemented report gates, but collect a closer
+  60 fps session before personal fine-tuning to get sample size and a held-out
+  subset.
 - Is one tripod side-view sufficient for the run-up direction velocity, or
   do we need an end-of-runway camera to capture the approach-direction
-  component that side-view projects away?
+  component that side-view projects away? The Athlete A_takeoff-stationary
+  clips (camera pointed roughly along the runway, not side-on) proved this
+  matters: vh collapsed to near zero because the run-up is in the depth
+  direction, which monocular cannot recover.
 - Are there any panned clips worth retaining for *relative* analysis (stride
   rhythm, joint angles, body alignment) even though they cannot give
   training-grade translational metrics?

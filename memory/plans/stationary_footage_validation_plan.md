@@ -115,26 +115,29 @@ Final gate assessment (newer trio):
 
 | Gate | N1 | N2 | N3 |
 |---|---|---|---|
-| window_pose_validity ≥ 60 % | ✅ 70 % | ✅ 73 % | ✅ 62 % |
-| contact_interval | ✅ | ✅ | ❌ |
-| takeoff_anchor_review | ✅ | ✅ | ❌ (no contact) |
+| window_pose_validity ≥ 60 % | ✅ 70.0 % | ✅ 73.3 % | ✅ 61.7 % |
+| contact_interval | ✅ | ✅ | ✅ |
+| takeoff_anchor_review | ✅ | ✅ | ✅ |
 | segment_spread ≤ 1.35 | ✅ | ✅ | ✅ |
 | stationary_camera source | ✅ | ✅ | ✅ |
 | vh in [2.5, 5.5] m/s | ✅ | ✅ | ✅ |
 | angle in [38, 55] ° | ✅ | ✅ | ✅ |
-| **training_grade** | **✅** | **✅** | **❌** |
+| **training_grade** | **✅** | **✅** | **✅** |
 
-**2/3 newer clips (N1, N2) pass all gates. Pilot threshold met (≥ 2 clips).**
+**3/3 newer clips pass all gates after the 2026-06-13 foot-contact correction.
+Pilot threshold met (≥ 2 clips).**
 
-N3 fails only due to contact detection failure (ankle not tracked near ground
-contact). This is a per-clip tracking issue, not a systematic protocol failure.
+The previous N3 failure was caused by using ankle/malleolus height for contact
+detection. In plantarflexed toe-off the heel/forefoot can be loaded while the
+ankle remains above the 5 cm ground band. Contact now keys on the lowest
+heel/forefoot marker per foot, with ankle fallback only for reduced skeletons.
 
 The two earlier controls remain outside gate for unrelated reasons (approach-stride
 anchor, high segment spread). They are not part of the path-forward protocol.
 
-**Pilot outcome: PROMISING.** Two of the newer clips pass the implemented
-report gates; one requires improved ankle tracking near contact. Phase 10
-readiness still requires the prep items below.
+**Pilot outcome: PROMISING.** All newer clips pass the implemented report gates,
+but Phase 10 readiness still requires the prep items below: a larger fixed-camera
+session and a held-out split.
 
 **Raw anthropometry cross-check (2026-06-03):**
 
@@ -149,6 +152,83 @@ anchors yet. ROI crop does not materially change that conclusion.
 This is evidence for the lower-limb anatomical proportions only. It does not
 validate absolute scene scale, approach-direction velocity, or optimiser
 claims.
+
+**Current-footage rescue pass (2026-06-03; superseded for the newer trio on
+2026-06-13):**
+
+Two current-footage focusing strategies were tested because a new stationary
+session is not available:
+
+- `--roi-crop takeoff`: a tighter pass-2 ROI around the estimated
+  takeoff/flight window. This is not uniformly better than whole-clip ROI; it
+  preserved one admitted newer clip but caused another newer clip to fail
+  contact/anchor review.
+- `scripts/create_takeoff_focus_clips.py`: creates ignored derivative clips by
+  temporally trimming around takeoff/flight, applying a static crop, and
+  upscaling the athlete before running the ordinary pipeline.
+
+The derivative clips were complementary before the contact fix: whole-clip ROI
+admitted newer clips 1 and 2, while the takeoff-focused derivative admitted
+newer clip 3. The 2026-06-13 heel/forefoot contact correction supersedes that
+fallback for the newer trio; whole-clip ROI now admits all three directly.
+Focused derivatives remain useful for overlay/diagnostic rescue, but not as new
+independent attempts for publication-grade claims.
+
+**Takeoff-stationary panned-run-up clips (2026-06-03):**
+
+Two new clips with horizontal panning during most of the run-up but an
+apparently stationary final segment were tested only through takeoff-window
+derivatives. Automatic focused crops and wider windows failed the gates. Manual
+visual crops around the actual stationary plant/takeoff/bar-clearance windows
+do improve pose evidence: pose validity is 81-84 %, takeoff-window validity is
+78-100 %, and contact is detected. However, both still fail anchor review and
+produce implausible translational metrics under the current pipeline: derived
+horizontal takeoff velocity is near zero and takeoff angle is outside the gate.
+A full-video handheld/ROI diagnostic is also implausible.
+
+Conclusion: do not include these two clips in the admitted sample cache under
+the current pipeline. They are useful for overlay/relative technique review, but
+not for training-grade translational samples.
+
+**Root-cause analysis (2026-06-04):**
+
+Three independent failures confirmed by inspection of all crop variants and
+arithmetic verification against report data:
+
+1. Camera geometry — structural, not fixable by code. The run-up direction
+   for these clips has a large depth (Z) component relative to the camera.
+   The 2D X coordinate barely changes as the athlete approaches; derived
+   horizontal velocity is near zero (0.06–0.13 m/s) across all crop variants.
+   The full-frame handheld result gives vh=5.91 only because the panning
+   camera during the approach adds apparent X displacement. Once the panning
+   frames are excluded (derivative crops), vh collapses. A monocular camera
+   without a scene anchor cannot recover depth-direction velocity. This camera
+   angle (looking approximately along the run-up) is fundamentally different
+   from the side-on setup that works for the admitted Athlete A_stationary_footage
+   clips (vh 3.57–4.09 m/s from X displacement).
+
+2. Global peak-CoM frame misidentification — fixable in code (deferred). The
+   pipeline uses `argmax(com_pos[:,1])` over the whole clip to identify the
+   flight apex. When the clip includes approach strides and the constant-mpp
+   calibration overestimates early-approach positions (athlete further from
+   camera → same mpp as at takeoff → inflated Y), the approach stride CoM Y
+   meets or exceeds the flight peak Y. This causes `peak_com_frame ≤
+   candidate_frame` and the anchor check fails even when the vy-based arithmetic
+   would otherwise pass. Deferred fix: replace the global argmax with a windowed
+   search bounded below by `argmax(vy)`. This fix has merit for all clips, not
+   just this footage. It must NOT be motivated by trying to admit these clips,
+   because camera geometry (issue 1) blocks admission regardless.
+
+3. Landing contacts selected as toe-off — consequence of issues 1 and 2. The
+   derivative clips start at or after the actual toe-off moment, so no pre-peak
+   approach contact is visible. The pre-peak filter in `select_takeoff_frame_
+   details` cannot reject landing contacts because either there are no pre-peak
+   contacts (empty filter result) or the peak_com_frame is wrong (issue 2).
+   Contact intervals 7 in an 81-frame clip and takeoff at the last frame confirm
+   the pipeline is selecting mat-bounce landing contacts.
+
+Admission gate behaviour is correct — the gates correctly reject clips where
+translational physics cannot be validated from the available geometry.
 
 ## Required Prep
 
@@ -179,7 +259,8 @@ claims.
    Stricter `pose_validity_pct` metric: replaced >=4-of-33 with all-8-key-joints
    (shoulders/hips/knees/ankles, idx 11,12,23,24,25,26,27,28), matching
    `PoseFrame.is_valid`. 60 % admission threshold unchanged.
-   All focused tests pass; the current non-PINN suite is 272/272 green.
+   All focused tests pass; current full-suite status after the foot-contact
+   correction is 285/285 green.
 5. Completed (2026-06-03): admitted-only caching added. The analyser writes
    `.npz` only for `training_grade` clips and records every decision in ignored
    local `_admission_manifest.json`. The fine-tune loader reads only
@@ -285,8 +366,8 @@ If the pilot fails:
 
 ## Tests For Tooling Changes
 
-All focused tests shipped (2026-06-03). 272/272 non-PINN and 277/277 total
-tests pass.
+All focused tests shipped (2026-06-03) and the 2026-06-13 foot-contact
+regression tests pass. Current suite: 285/285 total tests pass.
 
 - CLI bar-height override precedence over filename parsing — done.
 - overlay fps derived from decoded timestamp cadence — done.
@@ -306,5 +387,8 @@ tests pass.
   refusal — done.
 - raw stationary anthropometry diagnostic recovers synthetic proportions and
   excludes low-visibility chains — done.
+- takeoff-focused ROI and focused derivative clips tested; the derivative
+  route remains an audited diagnostic fallback, but the newer trio no longer
+  needs it after heel/forefoot contact detection — done.
 - aggregate/report output contains no raw clip identifiers — by design (video
   stem only, not full path; raw paths gitignored under data/results/).
