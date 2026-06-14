@@ -50,9 +50,11 @@ from scripts.analyze_jump_video import (  # noqa: E402
 from scripts.analyze_stable_takeoff_window import (  # noqa: E402
     ANCHOR_NAMES,
     DEFAULT_UPRIGHT_SEPARATION_M,
+    BarPlaneFitConfig,
     ProjectileFitConfig,
     StableWindowAnchors,
     com_pixel_trajectory,
+    fit_bar_plane_projectile,
     fit_projectile_to_com_pixels,
     focal_length_from_fov_px,
     key_joint_valid_mask,
@@ -183,6 +185,8 @@ def analyse_moving_takeoff(
     fov_deg: float,
     focal_length_px: float | None,
     max_stab_residual_px: float,
+    solver: str,
+    bar_plane_window_s: float,
     debug_image: Path | None,
 ) -> dict[str, Any]:
     cv2 = _require_cv2()
@@ -274,20 +278,34 @@ def analyse_moving_takeoff(
             image_points_px=image_points,
         )
 
-    base_focal = focal_length_px or focal_length_from_fov_px(width, fov_deg)
-    camera = solve_camera_from_anchors(
-        anchors, image_width=width, image_height=height, focal_length_px=base_focal
-    )
-    fit = fit_projectile_to_com_pixels(
-        com_px_stab,
-        valid_mask,
-        takeoff_frame=takeoff_frame,
-        fps=fps,
-        camera=camera,
-        anchors=anchors,
-        athlete_height_m=height_m,
-        config=ProjectileFitConfig(max_fit_s=min(0.9, window_post / max(1.0, fps))),
-    )
+    if solver == "bar_plane":
+        # Well-posed: warps CoM into the apparatus plane and fits a 2D gravity
+        # parabola. No focal-length/FOV assumption, no depth degeneracy.
+        camera = None
+        fit = fit_bar_plane_projectile(
+            com_px_stab,
+            valid_mask,
+            takeoff_frame=takeoff_frame,
+            fps=fps,
+            anchors=anchors,
+            athlete_height_m=height_m,
+            config=BarPlaneFitConfig(fit_window_s=bar_plane_window_s),
+        )
+    else:
+        base_focal = focal_length_px or focal_length_from_fov_px(width, fov_deg)
+        camera = solve_camera_from_anchors(
+            anchors, image_width=width, image_height=height, focal_length_px=base_focal
+        )
+        fit = fit_projectile_to_com_pixels(
+            com_px_stab,
+            valid_mask,
+            takeoff_frame=takeoff_frame,
+            fps=fps,
+            camera=camera,
+            anchors=anchors,
+            athlete_height_m=height_m,
+            config=ProjectileFitConfig(max_fit_s=min(0.9, window_post / max(1.0, fps))),
+        )
 
     quality_failures = list(fit.get("decision_reasons", []))
     if not contact_detected:
@@ -408,6 +426,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fov-deg", type=float, default=60.0)
     parser.add_argument("--focal-length-px", type=float, default=None)
     parser.add_argument("--max-stab-residual-px", type=float, default=3.0)
+    parser.add_argument("--solver", choices=("bar_plane", "pnp_3d"), default="bar_plane",
+                        help="bar_plane (well-posed, default) or pnp_3d (legacy, depth-degenerate).")
+    parser.add_argument("--bar-plane-window-s", type=float,
+                        default=BarPlaneFitConfig.fit_window_s,
+                        help="Post-toe-off fit window (s) for the bar_plane solver.")
     parser.add_argument("--debug-image", type=Path, default=None)
     return parser
 
@@ -430,6 +453,8 @@ def main() -> None:
         fov_deg=args.fov_deg,
         focal_length_px=args.focal_length_px,
         max_stab_residual_px=args.max_stab_residual_px,
+        solver=args.solver,
+        bar_plane_window_s=args.bar_plane_window_s,
         debug_image=args.debug_image,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)

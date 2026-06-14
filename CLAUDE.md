@@ -152,9 +152,15 @@ Stationary pilot outcome (5 clips, 2 captures, explicitly confirmed fixed camera
   `_projectile_residuals` and added a soft horizontal-speed cap. The validated
   fix is a **bar-plane-constrained 2D gravity fit** (warp CoM through the
   apparatus-plane homography): on IMG_4829 it yields physical metrics
-  (~40–46°, vh 2–4 m/s) vs the 3D fit's −60°. Implementing that planar solver
-  as the primary physics path is the next step. Until then, apparatus/PnP fits
-  remain rejected diagnostics only.
+  (~40–46°, vh 2–4 m/s) vs the 3D fit's −60°. The bar-plane solver now exists
+  (`--solver bar_plane`, the default; gravity-as-scale form recovering depth
+  scale k, angle scale-invariant) with synthetic tests. **Validation moved the
+  blocker upstream:** on IMG_4829 the takeoff-window CoM is too sparse/noisy and
+  the athlete sits well off the bar plane (warped scene X≈−6 m vs ±2.01 m
+  standards), so the solver correctly rejects it. We lack a clip with *both* good
+  takeoff-window pose validity *and* apparatus anchors. Next: apparatus detection
+  on the good-pose daylight clips + denser CoM / precise toe-off. Apparatus/PnP
+  fits remain rejected diagnostics only.
 
 The analyser now caches only `training_grade` clips when `--save-samples` is
 supplied, records every decision in ignored `_admission_manifest.json`, and

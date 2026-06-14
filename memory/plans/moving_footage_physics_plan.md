@@ -139,6 +139,40 @@ frame + short fit window; (3) then return to apparatus-detection robustness and
 stabilization (already working) to feed it. The scene homography for the planar
 fit needs only the 4 apparatus anchors — no focal-length/FOV assumption.
 
+### Bar-plane solver implemented + validation finding (2026-06-14, later)
+Implemented `fit_bar_plane_projectile` in `analyze_stable_takeoff_window.py`,
+wired a `--solver {bar_plane,pnp_3d}` flag into both scripts (default
+`bar_plane`), with a `--bar-plane-window-s` knob and synthetic physics-law tests
+(310 non-PINN tests green). Two solver forms were explored:
+
+- *Fixed-g* (gravity enforced at 9.81 in bar-plane coords): robust but biased —
+  on IMG_4829 it gave a plausible angle (~42 deg, matching the anatomical ~46
+  deg) yet a large in-plane residual (~0.65 m), because the athlete is offset
+  from the bar plane.
+- *Gravity-as-scale* (free quadratic -> apparent g -> depth scale k=Zbar/Zath;
+  angle is scale-invariant, velocities rescale by 1/k): the principled form and
+  the one kept. The synthetic in-plane test recovers k=1 and exact velocities.
+
+**Validation finding — the blocker is now UPSTREAM of the solver.** Dumping the
+warped CoM track for IMG_4829 showed: (1) the takeoff-window pose is sparse
+(many invalid frames; the detected toe-off frame 35 lands in an invalid run);
+(2) the athlete is well off the bar plane — valid airborne frames warp to scene
+X ~= -6 m although the standards are at +/-2.01 m, so the bar-plane warp is
+geometrically wrong; (3) the warped track is not ballistic (Y jumps 1.75 -> 0.60
+m across an invalid gap from CoM misdetections). The gravity-as-scale solver
+correctly *rejects* this (negative apparent g, k out of range) rather than
+emitting false physics.
+
+So the next blockers are upstream, not the solver: dense/clean CoM in the
+takeoff window, a toe-off frame that lands in valid frames, and either athletes
+near the bar plane or an explicit depth-offset (parallel-plane) model. Crucially
+we lack a clip with BOTH good takeoff-window pose validity AND apparatus anchors:
+IMG_4829/4830 have anchors but sparse/off-plane poses; the daylight stationary
+trio has good poses (61-73 %) but the apparatus detector does not yet lock on.
+**Priority shifts back to (a) apparatus detection on the good-pose daylight clips
+and (b) CoM density/toe-off precision in the takeoff window**, so the (working,
+well-posed) bar-plane solver finally gets a clean input to prove itself on.
+
 ### Parallel spikes (offline/cloud, not blocking)
 - Small 4-anchor keypoint regressor for the apparatus (thin-bar-friendly; corpus
   is large enough to label ~100–200 frames × 4 points).
