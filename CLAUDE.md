@@ -129,16 +129,32 @@ Stationary pilot outcome (5 clips, 2 captures, explicitly confirmed fixed camera
 - Apparatus detection status (2026-06-14): the red/night stable-window detector
   in `scripts/detect_stable_takeoff_anchors.py` can label the red apparatus and
   now fits the landing-pad top edge independently, but it is not a general
-  daylight detector. It fails on the fully stationary daylight clips because
-  the standards/crossbar are pale and background poles dominate. The older
-  generic Hough scene-anchor detector also locks onto floodlights/background
-  poles there. Do not feed apparatus/PnP geometry into physics reports until a
-  geometry-first, colour-agnostic detector is validated visually and with tests.
-- Stable takeoff-window PnP caveat (2026-06-14): after the postprocessor API
-  fix, `scripts/analyze_stable_takeoff_window.py` runs, but current apparatus
-  camera/projectile fits on the panned takeoff-stationary clips produce
-  impossible velocities and must be treated as rejected diagnostics, not usable
-  physics.
+  daylight detector. A geometry-first, colour-agnostic detector now exists
+  (`src/pose_estimation/apparatus_detector.py`, CLI
+  `scripts/detect_apparatus_geometry.py`): it reproduces the night-red anchors
+  *without* requiring red and correctly rejects the floodlight masts (no paired
+  crossbar), but is still only ~1/3 reliable on the daylight stationary clips
+  (one clip clean, one wrong substructure, one missed). Not yet admission-grade.
+- Moving-footage takeoff workstream (2026-06-14, see
+  `memory/plans/moving_footage_physics_plan.md`): new
+  `src/pose_estimation/camera_motion.py` measures background camera motion and
+  **stabilizes** a takeoff-centred window to a reference (proven: a ~6 px/frame
+  panning takeoff window registers to sub-pixel residual). Corpus scan finding:
+  "longest still window" is the pre-run-up standstill, **not** the takeoff — the
+  takeoff is where the camera pans, so the window must be centred on the detected
+  toe-off, and stabilization (not stillness) is the enabler. End-to-end
+  orchestration is `scripts/analyze_moving_takeoff.py`.
+- **Stable takeoff-window PnP root cause (2026-06-14): the impossible velocities
+  are a solver degeneracy, not a detection bug.** The free-depth 3D projectile
+  fit in `analyze_stable_takeoff_window.py` is unobservable along the camera
+  optical axis, so out-of-plane velocity runs away (vh ≈ 662 m/s on
+  IMG_4829/4830 — independent of camera motion). Fixed a residual-length bug in
+  `_projectile_residuals` and added a soft horizontal-speed cap. The validated
+  fix is a **bar-plane-constrained 2D gravity fit** (warp CoM through the
+  apparatus-plane homography): on IMG_4829 it yields physical metrics
+  (~40–46°, vh 2–4 m/s) vs the 3D fit's −60°. Implementing that planar solver
+  as the primary physics path is the next step. Until then, apparatus/PnP fits
+  remain rejected diagnostics only.
 
 The analyser now caches only `training_grade` clips when `--save-samples` is
 supplied, records every decision in ignored `_admission_manifest.json`, and

@@ -89,6 +89,13 @@ class ProjectileFitConfig:
     com_height_prior_fraction: float = 0.58
     com_height_prior_sigma_m: float = 0.30
     min_camera_depth_m: float = 0.10
+    # Soft physical cap on horizontal takeoff speed.  A single camera barely
+    # observes motion along its optical axis, so the projectile fit can run the
+    # out-of-plane velocity away to absurd values (hundreds of m/s) while still
+    # matching the image.  A hinge well above the elite band (~4-5 m/s) leaves
+    # legitimate fits untouched but removes the depth-runaway degeneracy.
+    max_horizontal_speed_mps: float = 9.0
+    horizontal_speed_penalty_sigma_mps: float = 0.75
     max_peak_com_m: float = DEFAULT_QUALITY_GATES.max_peak_com_m
     min_takeoff_horizontal_mps: float = DEFAULT_QUALITY_GATES.min_takeoff_horizontal_mps
     max_takeoff_horizontal_mps: float = DEFAULT_QUALITY_GATES.max_takeoff_horizontal_mps
@@ -334,10 +341,19 @@ def _projectile_residuals(
     projected = project_world_points(positions, camera)
     residuals = ((projected - obs_px) / config.pixel_sigma).ravel()
 
+    # Depth-behind-camera penalty.  Always appended (zero when satisfied) so the
+    # residual vector keeps a constant length — a conditional append changes the
+    # residual dimension between iterations and breaks scipy's robust losses.
     camera_depth = world_to_camera(positions, camera)[:, 2]
     depth_penalty = np.minimum(0.0, camera_depth - config.min_camera_depth_m)
-    if np.any(depth_penalty < 0):
-        residuals = np.concatenate([residuals, depth_penalty / config.min_camera_depth_m])
+    residuals = np.concatenate([residuals, depth_penalty / config.min_camera_depth_m])
+
+    # Soft physical cap on horizontal takeoff speed (out-of-plane degeneracy).
+    horizontal_speed = float(np.hypot(params[3], params[5]))
+    speed_excess = max(0.0, horizontal_speed - config.max_horizontal_speed_mps)
+    residuals = np.concatenate(
+        [residuals, np.array([speed_excess / config.horizontal_speed_penalty_sigma_mps])]
+    )
 
     com_height_prior_m = athlete_height_m * config.com_height_prior_fraction
     residuals = np.concatenate(

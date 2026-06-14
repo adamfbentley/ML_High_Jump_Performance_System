@@ -228,3 +228,26 @@
   relationship, athlete masking only as a negative cue, and temporal stability
   across stationary frames. The detector must reject background poles before it
   can feed the physics pipeline.
+- Moving-footage takeoff workstream opened (plan:
+  `memory/plans/moving_footage_physics_plan.md`), since the camera is
+  quasi-stationary during the jump itself even in panned clips.
+- Built the geometry-first detector (`src/pose_estimation/apparatus_detector.py`,
+  CLI `scripts/detect_apparatus_geometry.py`). It rejects floodlight masts (no
+  paired crossbar) and reproduces the night-red anchors without using red, but is
+  only ~1/3 reliable on daylight clips — keep it diagnostic. MediaPipe
+  ObjectDetector is COCO-only and weak on a thin bar; a 4-anchor keypoint
+  regressor is the long-term option, not boxes.
+- Built `src/pose_estimation/camera_motion.py` (camera-motion estimation +
+  takeoff-window stabilization, CLI `scripts/scan_stable_windows.py`). Measured
+  finding: "longest stable window" is the pre-run-up standstill, not the takeoff;
+  the takeoff is where the camera pans. Decision: do not gate on stillness —
+  centre the window on the detected toe-off and stabilize it. A ~6 px/frame
+  panning takeoff window registered to a reference at sub-pixel residual.
+- Root-caused the impossible apparatus/PnP velocities: a monocular solver
+  degeneracy (unobservable along the camera optical axis), present even on the
+  stationary IMG_4829/4830 (vh ~ 662 m/s). Fixed a residual-length bug and added
+  a soft horizontal-speed cap in `analyze_stable_takeoff_window.py`. Decision:
+  the primary physics path becomes a **bar-plane-constrained 2D gravity fit**
+  (validated diagnostic: ~40-46 deg, vh 2-4 m/s on IMG_4829). End-to-end
+  orchestration is `scripts/analyze_moving_takeoff.py`. No optimiser claims or
+  fine-tuning until the planar solver lands and is validated.
