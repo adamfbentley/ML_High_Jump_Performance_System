@@ -665,6 +665,35 @@ geometry, fits a post-toe-off 3D CoM projectile under gravity, and reports
 verify recovery of known launch velocity. This is the right path for extracting
 meaningful takeoff physics without claiming full run-up recovery.
 
+**Stationary retest and apparatus-detector boundary (2026-06-14):**
+The approved production stationary path was rerun on the three newer fully
+stationary Athlete A clips with `--capture-mode stationary
+--stationary-camera-confirmed --roi-crop on --bar-height 1.75`. All three
+clips again pass `training_grade`, are cached as admitted samples, and produce
+plausible takeoff-window metrics: angles 40.5-42.2 deg, takeoff horizontal
+velocity 3.65-4.11 m/s, takeoff vertical velocity 3.26-3.51 m/s, and Newton
+peak vertical GRF 4.74-5.05 BW. This confirms the current reliable path is
+still MediaPipe skeleton -> anatomical/confirmed-stationary calibration ->
+contact-anchored kinematics.
+
+The new stable-window apparatus detector is useful but not general yet. On the
+night/red takeoff-stationary frames it can identify the high-jump standards,
+crossbar, and a separately fitted landing-pad top edge for review. It is still
+colour-biased and fails on the daylight stationary clips, where the apparatus is
+pale and background floodlights/poles dominate. The older generic Hough scene
+anchor detector also falsely locks onto those background poles in the daylight
+frames. Therefore apparatus/PnP camera geometry is not yet an admission-grade
+scale or perspective source. The next apparatus step is a geometry-first,
+colour-agnostic detector that rejects background poles by requiring the standard
+pair, crossbar/standard intersections, landing-pad relationship, and temporal
+stability.
+
+`scripts/analyze_stable_takeoff_window.py` was brought back in sync with the
+current postprocessor API, but the current panned takeoff-stationary
+apparatus/PnP projectile fits still produce impossible velocities and are
+rejected diagnostics only. Do not use them for optimiser claims or training
+samples.
+
 ### Phase 11 — Validation and Paper
 
 - Compare predicted vs. measured jump heights on held-out attempts.

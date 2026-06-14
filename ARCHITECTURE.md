@@ -221,6 +221,8 @@ be trusted.
 | `scripts/download_datasets.py` | Print manual public-dataset download instructions. |
 | `scripts/render_pose_overlay.py` | Render pose overlays for inspection. |
 | `scripts/create_takeoff_focus_clips.py` | Create ignored, static-crop derivative clips around takeoff/flight for current-footage rescue experiments. |
+| `scripts/detect_stable_takeoff_anchors.py` | Experimental one-frame apparatus anchor detector for stable takeoff-window review; currently reliable only for the red/night apparatus clips, not daylight stationary footage. |
+| `scripts/analyze_stable_takeoff_window.py` | Experimental takeoff-window-only apparatus/PnP projectile fitter for panned-run-up clips with stationary final steps; diagnostic only until apparatus camera fits are validated. |
 
 ## Local Agent Memory
 

@@ -203,3 +203,28 @@
   gravity. This is the intended path for extracting meaningful takeoff physics
   from clips whose run-up was panned but whose final plant/takeoff window is
   stable. Outputs are explicitly `takeoff_window_only`.
+
+## 2026-06-14
+
+- Production stationary retest completed on the three newer fixed-camera Athlete A
+  clips. The approved path (`analyze_jump_video.py`, stationary capture mode,
+  explicit stationary confirmation, ROI crop on, bar height 1.75 m, measured
+  thigh/shank) admits all three as `training_grade` and writes admitted samples.
+  This remains the reliable current route for extracting physics from local
+  private footage.
+- Apparatus detection boundary clarified. The red/night stable-window detector
+  can label the red apparatus and now fits the landing-pad top edge as its own
+  image cue, but it is not a general detector. It fails on daylight stationary
+  footage because the standards and bar are pale while floodlights/background
+  poles are stronger. The generic Hough scene-anchor detector also falsely
+  selects background poles in those daylight frames. Do not use either detector
+  as an admission-grade scale/perspective source on daylight stationary clips.
+- `scripts/analyze_stable_takeoff_window.py` was updated for the current
+  `PostProcessorConfig` API and runs again. Current apparatus/PnP projectile
+  fits on the panned takeoff-stationary clips still produce impossible
+  velocities, so those outputs remain rejected diagnostics only.
+- Next apparatus work should be geometry-first and colour-agnostic: paired
+  high-jump standards, crossbar/standard intersections, landing-pad edge
+  relationship, athlete masking only as a negative cue, and temporal stability
+  across stationary frames. The detector must reject background poles before it
+  can feed the physics pipeline.

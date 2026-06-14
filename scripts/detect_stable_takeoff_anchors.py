@@ -1,9 +1,11 @@
-"""Detect stable-window high-jump apparatus anchors from labelled base posts.
+"""Detect stable-window high-jump apparatus anchors from labelled or auto-seeded posts.
 
 This helper is for the takeoff-stationary clips where the camera is stable over
-the final plant/takeoff window.  The user still provides the two visible upright
-base posts; the script then searches upward for the red crossbar using the
-base-post line as the expected horizontal direction.
+the final plant/takeoff window.  The manual path takes the two visible upright
+base posts; the auto path seeds those posts from the red apparatus region and
+near-vertical line groups, optionally masking the athlete with MediaPipe Pose.
+Both paths then search upward for the red crossbar using the base-post line as
+the expected horizontal direction.
 
 It writes the same one-frame anchor JSON consumed by
 ``scripts/analyze_stable_takeoff_window.py`` plus a debug image for review.
@@ -47,7 +49,7 @@ class BarScanConfig:
 
 @dataclass(frozen=True)
 class LineCandidate:
-    """A horizontal-ish line candidate parallel to the post-base line."""
+    """A horizontal-ish line candidate in image coordinates."""
 
     y_center_px: float
     left_px: np.ndarray
@@ -76,6 +78,30 @@ class RefinedApparatusGeometry:
     right_base_px: np.ndarray
     left_post_line: np.ndarray | None
     right_post_line: np.ndarray | None
+
+
+@dataclass(frozen=True)
+class AutoBasePostSeed:
+    """Automatically seeded upright base posts and diagnostics."""
+
+    left_base_px: np.ndarray
+    right_base_px: np.ndarray
+    person_bbox_px: list[float] | None
+    red_roi_px: list[float]
+    method: str
+    candidate_count: int
+
+
+@dataclass(frozen=True)
+class VerticalLineGroup:
+    """Grouped near-vertical line evidence for an apparatus upright."""
+
+    x_px: float
+    y_top_px: float
+    y_base_px: float
+    length_sum_px: float
+    segment_count: int
+    mean_angle_from_vertical_deg: float
 
 
 def _require_cv2():
@@ -226,6 +252,381 @@ def _red_response(frame_bgr: np.ndarray) -> np.ndarray:
     return np.maximum(0.0, r - 0.70 * g - 0.45 * b)
 
 
+def _expanded_bbox(
+    bbox_px: list[float],
+    *,
+    width: int,
+    height: int,
+    pad_fraction: float,
+) -> tuple[int, int, int, int]:
+    x0, y0, x1, y1 = [float(value) for value in bbox_px]
+    pad_x = (x1 - x0) * pad_fraction
+    pad_y = (y1 - y0) * pad_fraction
+    return (
+        int(max(0, np.floor(x0 - pad_x))),
+        int(max(0, np.floor(y0 - pad_y))),
+        int(min(width, np.ceil(x1 + pad_x))),
+        int(min(height, np.ceil(y1 + pad_y))),
+    )
+
+
+def _mediapipe_person_bbox(frame_bgr: np.ndarray) -> list[float] | None:
+    """Return an athlete bbox from MediaPipe Pose, or None if unavailable.
+
+    MediaPipe Pose detects people, not high-jump apparatus.  We use it only to
+    keep athlete pixels from dominating the red/edge search that seeds the
+    apparatus geometry.
+    """
+    try:
+        import mediapipe as mp
+    except ImportError:
+        return None
+
+    cv2 = _require_cv2()
+    height, width = frame_bgr.shape[:2]
+    try:
+        pose_module = mp.solutions.pose
+    except AttributeError:
+        return None
+    with pose_module.Pose(
+        static_image_mode=True,
+        model_complexity=1,
+        enable_segmentation=False,
+        min_detection_confidence=0.35,
+    ) as pose:
+        result = pose.process(cv2.cvtColor(frame_bgr[:, :, :3], cv2.COLOR_BGR2RGB))
+    if result.pose_landmarks is None:
+        return None
+
+    points: list[tuple[float, float]] = []
+    for landmark in result.pose_landmarks.landmark:
+        visibility = float(getattr(landmark, "visibility", 1.0))
+        if visibility < 0.45:
+            continue
+        x_px = float(landmark.x) * width
+        y_px = float(landmark.y) * height
+        if np.isfinite([x_px, y_px]).all():
+            points.append((x_px, y_px))
+    if len(points) < 6:
+        return None
+
+    xy = np.asarray(points, dtype=np.float64)
+    x0, y0 = np.percentile(xy, 2, axis=0)
+    x1, y1 = np.percentile(xy, 98, axis=0)
+    x0_i, y0_i, x1_i, y1_i = _expanded_bbox(
+        [float(x0), float(y0), float(x1), float(y1)],
+        width=width,
+        height=height,
+        pad_fraction=0.12,
+    )
+    if x1_i - x0_i < 12 or y1_i - y0_i < 12:
+        return None
+    return [float(x0_i), float(y0_i), float(x1_i), float(y1_i)]
+
+
+def _spans_from_active_mask(active: np.ndarray, *, min_width_px: int) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    start: int | None = None
+    for idx, is_active in enumerate(np.asarray(active, dtype=bool)):
+        if is_active and start is None:
+            start = idx
+        elif not is_active and start is not None:
+            if idx - start >= min_width_px:
+                spans.append((start, idx))
+            start = None
+    if start is not None and len(active) - start >= min_width_px:
+        spans.append((start, len(active)))
+    return spans
+
+
+def _red_apparatus_roi(
+    frame_bgr: np.ndarray,
+    *,
+    person_bbox_px: list[float] | None,
+) -> tuple[int, int, int, int]:
+    """Find the dominant red apparatus span in the stable takeoff frame."""
+    cv2 = _require_cv2()
+    height, width = frame_bgr.shape[:2]
+    red = cv2.GaussianBlur(_red_response(frame_bgr), (5, 5), 0)
+
+    y0 = int(round(0.28 * height))
+    y1 = int(round(0.84 * height))
+    search_mask = np.zeros((height, width), dtype=bool)
+    search_mask[y0:y1, :] = True
+    if person_bbox_px is not None:
+        bx0, by0, bx1, by1 = _expanded_bbox(
+            person_bbox_px,
+            width=width,
+            height=height,
+            pad_fraction=0.35,
+        )
+        search_mask[by0:by1, bx0:bx1] = False
+
+    valid_values = red[search_mask]
+    valid_values = valid_values[np.isfinite(valid_values)]
+    if valid_values.size == 0:
+        raise RuntimeError("No valid pixels available for red apparatus search")
+
+    min_span_width = max(80, int(round(0.075 * width)))
+    smooth_kernel = max(21, int(round(0.012 * width)) | 1)
+    smoothing = np.ones(smooth_kernel, dtype=np.float64) / float(smooth_kernel)
+    best_span: tuple[int, int] | None = None
+    best_score = -np.inf
+
+    for percentile in (92, 90, 88, 85, 80):
+        threshold = max(15.0, float(np.percentile(valid_values, percentile)))
+        red_mask = (red >= threshold) & search_mask
+        column_score = np.mean(red_mask[y0:y1, :], axis=0)
+        smooth_score = np.convolve(column_score, smoothing, mode="same")
+        nonzero_score = smooth_score[smooth_score > 0.0]
+        if nonzero_score.size == 0:
+            continue
+        active_threshold = max(0.002, float(np.percentile(nonzero_score, 80)) * 0.45)
+        active = smooth_score >= active_threshold
+        for span_start, span_end in _spans_from_active_mask(
+            active,
+            min_width_px=min_span_width,
+        ):
+            span_width = span_end - span_start
+            if span_width > int(round(0.70 * width)):
+                continue
+            span_center = (span_start + span_end) / 2.0
+            if span_center < 0.38 * width:
+                continue
+            support = float(np.sum(smooth_score[span_start:span_end]))
+            # Prefer a compact, right-half red region.  This rejects red text,
+            # track features, and background spectators before post fitting.
+            score = support + 0.012 * span_width - 0.0008 * abs(span_center - 0.74 * width)
+            if score > best_score:
+                best_score = score
+                best_span = (span_start, span_end)
+        if best_span is not None:
+            break
+
+    if best_span is None:
+        raise RuntimeError("Could not find a red apparatus span for auto base seeding")
+
+    x0, x1 = best_span
+    return (int(x0), int(y0), int(x1), int(y1))
+
+
+def _vertical_line_groups(
+    frame_bgr: np.ndarray,
+    *,
+    red_roi_px: tuple[int, int, int, int],
+    person_bbox_px: list[float] | None,
+) -> list[VerticalLineGroup]:
+    """Group near-vertical line segments around the red apparatus region."""
+    cv2 = _require_cv2()
+    height, width = frame_bgr.shape[:2]
+    red_x0, _red_y0, red_x1, _red_y1 = red_roi_px
+    red_width = max(1, red_x1 - red_x0)
+    margin = max(170, int(round(0.38 * red_width)))
+    x0 = int(max(0, red_x0 - margin))
+    x1 = int(min(width, red_x1 + margin))
+    y0 = int(max(0, round(0.25 * height)))
+    y1 = int(min(height, round(0.87 * height)))
+    if x1 <= x0 + 20 or y1 <= y0 + 40:
+        return []
+
+    gray = cv2.cvtColor(frame_bgr[y0:y1, x0:x1, :3], cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    edges = cv2.Canny(gray, 20, 80)
+    if person_bbox_px is not None:
+        bx0, by0, bx1, by1 = _expanded_bbox(
+            person_bbox_px,
+            width=width,
+            height=height,
+            pad_fraction=0.18,
+        )
+        local_x0 = max(0, bx0 - x0)
+        local_x1 = min(edges.shape[1], bx1 - x0)
+        local_y0 = max(0, by0 - y0)
+        local_y1 = min(edges.shape[0], by1 - y0)
+        if local_x1 > local_x0 and local_y1 > local_y0:
+            edges[local_y0:local_y1, local_x0:local_x1] = 0
+
+    min_line_length = max(60, int(round(0.055 * height)))
+    lines = cv2.HoughLinesP(
+        edges,
+        rho=1,
+        theta=np.pi / 180.0,
+        threshold=20,
+        minLineLength=min_line_length,
+        maxLineGap=max(38, int(round(0.05 * height))),
+    )
+    if lines is None:
+        return []
+
+    segments: list[dict[str, float]] = []
+    for raw_line in lines[:, 0, :]:
+        x1_l, y1_l, x2_l, y2_l = [float(value) for value in raw_line]
+        dx = x2_l - x1_l
+        dy = y2_l - y1_l
+        length = float(np.hypot(dx, dy))
+        if length < min_line_length:
+            continue
+        angle_from_vertical = abs(90.0 - abs(float(np.degrees(np.arctan2(dy, dx)))))
+        if angle_from_vertical > 16.0:
+            continue
+        x_mid = float((x1_l + x2_l) / 2.0 + x0)
+        y_top = float(min(y1_l, y2_l) + y0)
+        y_base = float(max(y1_l, y2_l) + y0)
+        if y_base < 0.45 * height:
+            continue
+        if not (red_x0 - 0.45 * red_width <= x_mid <= red_x1 + 0.45 * red_width):
+            continue
+        segments.append(
+            {
+                "x": x_mid,
+                "y_top": y_top,
+                "y_base": y_base,
+                "length": length,
+                "angle": angle_from_vertical,
+            }
+        )
+    if not segments:
+        return []
+
+    segments.sort(key=lambda item: item["x"])
+    clusters: list[list[dict[str, float]]] = []
+    for segment in segments:
+        if not clusters:
+            clusters.append([segment])
+            continue
+        cluster_x = float(
+            np.average(
+                [item["x"] for item in clusters[-1]],
+                weights=[item["length"] for item in clusters[-1]],
+            )
+        )
+        if abs(segment["x"] - cluster_x) <= 28.0:
+            clusters[-1].append(segment)
+        else:
+            clusters.append([segment])
+
+    groups: list[VerticalLineGroup] = []
+    for cluster in clusters:
+        lengths = np.asarray([item["length"] for item in cluster], dtype=np.float64)
+        if float(np.sum(lengths)) < min_line_length:
+            continue
+        x_values = np.asarray([item["x"] for item in cluster], dtype=np.float64)
+        y_top_values = np.asarray([item["y_top"] for item in cluster], dtype=np.float64)
+        y_base_values = np.asarray([item["y_base"] for item in cluster], dtype=np.float64)
+        angle_values = np.asarray([item["angle"] for item in cluster], dtype=np.float64)
+        groups.append(
+            VerticalLineGroup(
+                x_px=float(np.average(x_values, weights=lengths)),
+                y_top_px=float(np.percentile(y_top_values, 15)),
+                y_base_px=float(np.percentile(y_base_values, 80)),
+                length_sum_px=float(np.sum(lengths)),
+                segment_count=len(cluster),
+                mean_angle_from_vertical_deg=float(np.average(angle_values, weights=lengths)),
+            )
+        )
+
+    groups.sort(key=lambda item: item.x_px)
+    return groups
+
+
+def _select_upright_pair(
+    groups: list[VerticalLineGroup],
+    *,
+    red_roi_px: tuple[int, int, int, int],
+    frame_width: int,
+) -> tuple[VerticalLineGroup, VerticalLineGroup]:
+    red_x0, _red_y0, red_x1, _red_y1 = red_roi_px
+    red_width = max(1.0, float(red_x1 - red_x0))
+    red_center = (red_x0 + red_x1) / 2.0
+    min_separation = max(210.0, 0.72 * red_width, 0.16 * frame_width)
+    max_separation = min(0.70 * frame_width, 1.55 * red_width + 90.0)
+    best_pair: tuple[VerticalLineGroup, VerticalLineGroup] | None = None
+    best_score = -np.inf
+
+    for left_index, left_group in enumerate(groups):
+        for right_group in groups[left_index + 1 :]:
+            separation = right_group.x_px - left_group.x_px
+            if separation < min_separation or separation > max_separation:
+                continue
+            if left_group.x_px > red_x0 + 0.27 * red_width:
+                continue
+            if right_group.x_px < red_x1 - 0.22 * red_width:
+                continue
+            if right_group.x_px > red_x1 + 0.34 * red_width:
+                continue
+
+            left_edge_error = abs(left_group.x_px - red_x0)
+            right_edge_error = abs(right_group.x_px - red_x1)
+            separation_error = abs(separation - red_width)
+            center_error = abs((left_group.x_px + right_group.x_px) / 2.0 - red_center)
+            length_bonus = 0.014 * (left_group.length_sum_px + right_group.length_sum_px)
+            base_bonus = 0.035 * min(left_group.y_base_px, right_group.y_base_px)
+            segment_bonus = 3.0 * (left_group.segment_count + right_group.segment_count)
+            angle_penalty = 1.8 * (
+                left_group.mean_angle_from_vertical_deg
+                + right_group.mean_angle_from_vertical_deg
+            )
+            score = (
+                length_bonus
+                + base_bonus
+                + segment_bonus
+                - left_edge_error
+                - right_edge_error
+                - 0.45 * separation_error
+                - 0.35 * center_error
+                - angle_penalty
+            )
+            if score > best_score:
+                best_score = float(score)
+                best_pair = (left_group, right_group)
+
+    if best_pair is None:
+        raise RuntimeError("Could not select a left/right upright pair from line groups")
+    return best_pair
+
+
+def auto_seed_base_posts(
+    frame_bgr: np.ndarray,
+    *,
+    use_mediapipe_person_mask: bool = True,
+) -> AutoBasePostSeed:
+    """Seed high-jump upright bases from image evidence before precise fitting."""
+    frame = np.asarray(frame_bgr)
+    if frame.ndim != 3 or frame.shape[2] < 3:
+        raise ValueError("frame_bgr must be a BGR image")
+
+    height, width = frame.shape[:2]
+    person_bbox = (
+        _mediapipe_person_bbox(frame)
+        if use_mediapipe_person_mask
+        else None
+    )
+    red_roi = _red_apparatus_roi(frame, person_bbox_px=person_bbox)
+    groups = _vertical_line_groups(
+        frame,
+        red_roi_px=red_roi,
+        person_bbox_px=person_bbox,
+    )
+    if len(groups) < 2:
+        raise RuntimeError("Auto base seeding found fewer than two vertical line groups")
+    left_group, right_group = _select_upright_pair(
+        groups,
+        red_roi_px=red_roi,
+        frame_width=width,
+    )
+
+    left_base = np.asarray([left_group.x_px, left_group.y_base_px], dtype=np.float64)
+    right_base = np.asarray([right_group.x_px, right_group.y_base_px], dtype=np.float64)
+    return AutoBasePostSeed(
+        left_base_px=left_base,
+        right_base_px=right_base,
+        person_bbox_px=person_bbox,
+        red_roi_px=[float(value) for value in red_roi],
+        method="red_apparatus_roi_vertical_hough_with_optional_mediapipe_person_mask",
+        candidate_count=int(len(groups)),
+    )
+
+
 def _line_from_points(point_a: np.ndarray, point_b: np.ndarray) -> np.ndarray:
     """Return homogeneous image line through two points."""
     a = np.asarray([point_a[0], point_a[1], 1.0], dtype=np.float64)
@@ -355,14 +756,27 @@ def _fit_local_upright_line(
         approximate_bar_y_px=approximate_bar_y_px,
     )
     if paired_centerline is not None:
-        return paired_centerline
+        nudged_line = _nudge_upright_line_to_post_profile(
+            frame_bgr,
+            rough_line=paired_centerline,
+            base_px=base,
+            approximate_bar_y_px=approximate_bar_y_px,
+        )
+        return nudged_line if nudged_line is not None else paired_centerline
     refined_line = _refine_upright_centerline(
         frame_bgr,
         base_px=base,
         rough_line=best_line,
         approximate_bar_y_px=approximate_bar_y_px,
     )
-    return refined_line if refined_line is not None else best_line
+    chosen_line = refined_line if refined_line is not None else best_line
+    nudged_line = _nudge_upright_line_to_post_profile(
+        frame_bgr,
+        rough_line=chosen_line,
+        base_px=base,
+        approximate_bar_y_px=approximate_bar_y_px,
+    )
+    return nudged_line if nudged_line is not None else chosen_line
 
 
 def _refine_upright_centerline(
@@ -448,6 +862,108 @@ def _refine_upright_centerline(
     return _line_from_points(point_top, point_bottom)
 
 
+def _nudge_upright_line_to_post_profile(
+    frame_bgr: np.ndarray,
+    *,
+    rough_line: np.ndarray,
+    base_px: np.ndarray,
+    approximate_bar_y_px: float,
+) -> np.ndarray | None:
+    """Correct small edge bias using the aligned brightness profile of the post."""
+    if not np.isfinite(rough_line).all():
+        return None
+
+    cv2 = _require_cv2()
+    height, width = frame_bgr.shape[:2]
+    base = np.asarray(base_px, dtype=np.float64)
+    y_start = float(min(base[1], approximate_bar_y_px) + 18.0)
+    y_end = float(max(base[1], approximate_bar_y_px) - 18.0)
+    if y_end <= y_start + 40.0:
+        return None
+
+    gray = cv2.cvtColor(frame_bgr[:, :, :3], cv2.COLOR_BGR2GRAY).astype(np.float64)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    offsets = np.arange(-45, 46, dtype=np.int32)
+    brightness_sum = np.zeros(len(offsets), dtype=np.float64)
+    sample_count = 0
+    row_count = min(180, max(40, int(round(y_end - y_start))))
+    for y_global in np.linspace(y_start, y_end, row_count):
+        x_pred = _x_at_y(rough_line, float(y_global))
+        if x_pred is None:
+            continue
+        yi = int(round(y_global))
+        xs = np.rint(float(x_pred) + offsets).astype(int)
+        inside = (0 <= xs) & (xs < width) & (0 <= yi) & (yi < height)
+        if int(np.count_nonzero(inside)) < 20:
+            continue
+        values = np.zeros(len(offsets), dtype=np.float64)
+        values[inside] = gray[yi, xs[inside]]
+        brightness_sum += values
+        sample_count += 1
+    if sample_count < 20:
+        return None
+
+    brightness = brightness_sum / float(sample_count)
+    kernel = np.ones(5, dtype=np.float64) / 5.0
+    smooth = np.convolve(brightness, kernel, mode="same")
+    threshold = max(
+        float(np.percentile(smooth, 65)),
+        float(np.mean(smooth) + 0.10 * np.std(smooth)),
+    )
+    active = smooth >= threshold
+    runs: list[tuple[int, int, float]] = []
+    start: int | None = None
+    for idx, is_active in enumerate(active):
+        if is_active and start is None:
+            start = idx
+        elif not is_active and start is not None:
+            if idx - start >= 4:
+                runs.append(
+                    (
+                        int(offsets[start]),
+                        int(offsets[idx - 1]),
+                        float(np.mean(smooth[start:idx])),
+                    )
+                )
+            start = None
+    if start is not None and len(active) - start >= 4:
+        runs.append((int(offsets[start]), int(offsets[-1]), float(np.mean(smooth[start:]))))
+    if not runs:
+        return None
+
+    nearby_post_runs = [
+        run
+        for run in runs
+        if 5 <= run[1] - run[0] + 1 <= 34
+        and (
+            run[0] <= 3 <= run[1]
+            or run[0] <= -3 <= run[1]
+            or 0 < run[0] <= 12
+            or -12 <= run[1] < 0
+        )
+    ]
+    if not nearby_post_runs:
+        return None
+    run_start, run_end, _mean_brightness = max(
+        nearby_post_runs,
+        key=lambda run: (run[2], -(run[1] - run[0])),
+    )
+    shift_px = (float(run_start) + float(run_end)) / 2.0
+    if abs(shift_px) < 1.5 or abs(shift_px) > 20.0:
+        return None
+
+    top_y = y_start
+    bottom_y = y_end
+    top_x = _x_at_y(rough_line, top_y)
+    bottom_x = _x_at_y(rough_line, bottom_y)
+    if top_x is None or bottom_x is None:
+        return None
+    return _line_from_points(
+        np.asarray([top_x + shift_px, top_y], dtype=np.float64),
+        np.asarray([bottom_x + shift_px, bottom_y], dtype=np.float64),
+    )
+
+
 def _centerline_from_upright_edge_pair(
     line_candidates: list[dict[str, object]],
     *,
@@ -495,7 +1011,18 @@ def _centerline_from_upright_edge_pair(
                 second["angle_from_vertical"]
             )
             width_penalty = abs(width_base - width_bar)
-            score = length_sum - 4.0 * base_error - 2.0 * width_penalty - 5.0 * angle_penalty
+            # When the rough seed is on one edge of the upright, two close
+            # edge/seam detections can otherwise beat the true outer-edge pair.
+            # A modest width bonus makes the full post envelope win while the
+            # existing width and angle gates reject unrelated background lines.
+            width_bonus = 2.8 * median_width
+            score = (
+                length_sum
+                + width_bonus
+                - 4.0 * base_error
+                - 2.0 * width_penalty
+                - 5.0 * angle_penalty
+            )
             if score > best_score:
                 best_score = score
                 best_line = centerline
@@ -717,6 +1244,125 @@ def _fit_local_red_bar_line(
     )
 
 
+def _fit_landing_pad_top_edge(
+    frame_bgr: np.ndarray,
+    *,
+    initial_pad_top: LineCandidate,
+    left_x_px: float,
+    right_x_px: float,
+) -> LineCandidate | None:
+    """Fit the visible red-over-blue landing-pad top edge between the uprights.
+
+    This line is a separate perspective cue from the crossbar and from the base
+    posts.  The upward scan gives the approximate vertical band; the final angle
+    comes from the image evidence at the pad boundary itself.
+    """
+    cv2 = _require_cv2()
+    frame = np.asarray(frame_bgr)
+    height, width = frame.shape[:2]
+    left_x = float(min(left_x_px, right_x_px))
+    right_x = float(max(left_x_px, right_x_px))
+    if right_x <= left_x + 40.0:
+        return None
+
+    y_center_guess = float(initial_pad_top.y_center_px)
+    x0 = int(max(0, np.floor(left_x - 20.0)))
+    x1 = int(min(width, np.ceil(right_x + 20.0)))
+    y0 = int(max(0, np.floor(y_center_guess - 80.0)))
+    y1 = int(min(height, np.ceil(y_center_guess + 80.0)))
+    if x1 <= x0 + 50 or y1 <= y0 + 35:
+        return None
+
+    roi = frame[y0:y1, x0:x1, :3].astype(np.float64)
+    b, g, r = roi[:, :, 0], roi[:, :, 1], roi[:, :, 2]
+    red_top = np.maximum(0.0, r - 0.65 * g - 0.35 * b)
+    blue_face = np.maximum(0.0, b - 0.35 * r - 0.20 * g)
+
+    band_px = 7
+    red_above = np.zeros_like(red_top)
+    red_below = np.zeros_like(red_top)
+    blue_above = np.zeros_like(blue_face)
+    blue_below = np.zeros_like(blue_face)
+    for dy in range(1, band_px + 1):
+        red_above[dy:] += red_top[:-dy]
+        red_below[:-dy] += red_top[dy:]
+        blue_above[dy:] += blue_face[:-dy]
+        blue_below[:-dy] += blue_face[dy:]
+    red_above /= float(band_px)
+    red_below /= float(band_px)
+    blue_above /= float(band_px)
+    blue_below /= float(band_px)
+
+    boundary_score = (
+        (red_above - red_below)
+        + (blue_below - blue_above)
+        + 0.25 * (red_above + blue_below)
+    )
+    boundary_score[:band_px, :] = 0.0
+    boundary_score[-band_px:, :] = 0.0
+    boundary_score = cv2.GaussianBlur(boundary_score.astype(np.float32), (5, 3), 0)
+    valid = boundary_score[np.isfinite(boundary_score)]
+    if valid.size == 0 or float(np.max(valid)) <= 1e-6:
+        return None
+
+    threshold = float(np.percentile(valid, 97))
+    mask = (boundary_score >= threshold).astype(np.uint8) * 255
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 2))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    lines = cv2.HoughLinesP(
+        mask,
+        rho=1,
+        theta=np.pi / 180.0,
+        threshold=25,
+        minLineLength=max(90, int(0.22 * (right_x - left_x))),
+        maxLineGap=35,
+    )
+    if lines is None:
+        return None
+
+    best: tuple[float, float, float, float, float] | None = None
+    for line in lines[:, 0, :]:
+        x1_l, y1_l, x2_l, y2_l = [float(value) for value in line]
+        dx = x2_l - x1_l
+        if abs(dx) < 1.0:
+            continue
+        slope = float((y2_l - y1_l) / dx)
+        if abs(slope) > 0.25:
+            continue
+        length = float(np.hypot(dx, y2_l - y1_l))
+        if length < max(90.0, 0.20 * (right_x - left_x)):
+            continue
+        intercept = float(y1_l - slope * x1_l)
+        local_mid_x = ((left_x + right_x) / 2.0) - float(x0)
+        y_mid_global = float(slope * local_mid_x + intercept + y0)
+        closeness = abs(y_mid_global - y_center_guess)
+
+        sample_count = int(max(20, length))
+        xs = np.linspace(x1_l, x2_l, sample_count)
+        ys = np.linspace(y1_l, y2_l, sample_count)
+        xi = np.clip(np.rint(xs).astype(int), 0, boundary_score.shape[1] - 1)
+        yi = np.clip(np.rint(ys).astype(int), 0, boundary_score.shape[0] - 1)
+        support = float(np.mean(boundary_score[yi, xi]))
+        score = length + 0.4 * support - 1.5 * closeness
+        if best is None or score > best[0]:
+            best = (score, slope, intercept, support, length)
+
+    if best is None:
+        return None
+    score, slope, intercept, support, _length = best
+    left_y = float(slope * (left_x - x0) + intercept + y0)
+    right_y = float(slope * (right_x - x0) + intercept + y0)
+    y_center = float(slope * (((left_x + right_x) / 2.0) - x0) + intercept + y0)
+    return LineCandidate(
+        y_center_px=y_center,
+        left_px=np.asarray([left_x, left_y], dtype=np.float64),
+        right_px=np.asarray([right_x, right_y], dtype=np.float64),
+        score=float(score),
+        coverage=float(min(1.0, max(0.0, support / max(1.0, float(np.percentile(valid, 99)))))),
+        red_coverage=initial_pad_top.red_coverage,
+    )
+
+
 def detect_bar_from_base_posts(
     frame_bgr: np.ndarray,
     *,
@@ -845,15 +1491,27 @@ def detect_bar_from_base_posts(
     # to the higher combined score.  This encodes the apparatus prior: moving
     # upward from the bases, the pad top appears first and the bar is the next
     # stable red/horizontal structure, not the highest red feature in the frame.
+    strong_min_coverage = max(config.min_bin_coverage, 0.65)
+    strong_min_red_coverage = max(config.min_red_bin_coverage, 0.65)
     selected_bar = max(
         bar_pool,
         key=lambda candidate: (
-            candidate.red_coverage >= config.min_red_bin_coverage,
-            candidate.coverage >= config.min_bin_coverage,
+            candidate.red_coverage >= strong_min_red_coverage
+            and candidate.coverage >= strong_min_coverage,
             candidate.y_center_px,
+            candidate.red_coverage,
+            candidate.coverage,
             candidate.score,
         ),
     )
+    if (
+        selected_bar.red_coverage < strong_min_red_coverage
+        or selected_bar.coverage < strong_min_coverage
+    ):
+        raise RuntimeError(
+            "No strongly red-supported crossbar candidate found above the pad; "
+            "try a clearer stable frame"
+        )
     refined = _fit_local_red_bar_line(
         frame,
         left_base_px=left,
@@ -868,6 +1526,19 @@ def detect_bar_from_base_posts(
         selected_bar = refined.selected_bar
         refined_left_base = refined.left_base_px
         refined_right_base = refined.right_base_px
+
+    display_pad_top = _fit_landing_pad_top_edge(
+        frame,
+        initial_pad_top=pad_top,
+        left_x_px=float(refined_left_base[0]),
+        right_x_px=float(refined_right_base[0]),
+    )
+    if display_pad_top is None:
+        display_pad_top = pad_top
+    display_candidates = [
+        display_pad_top if candidate is pad_top else candidate
+        for candidate in clustered
+    ]
 
     points_px = {
         "left_base": [
@@ -890,8 +1561,8 @@ def detect_bar_from_base_posts(
     return AnchorDetection(
         points_px=points_px,
         selected_bar=selected_bar,
-        pad_top=pad_top,
-        candidates=clustered,
+        pad_top=display_pad_top,
+        candidates=display_candidates,
     )
 
 
@@ -1044,8 +1715,19 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--frame-image", type=Path)
     source.add_argument("--video", type=Path)
     parser.add_argument("--frame-index", type=int, default=0)
-    parser.add_argument("--left-base", required=True, type=_parse_point)
-    parser.add_argument("--right-base", required=True, type=_parse_point)
+    parser.add_argument("--left-base", type=_parse_point)
+    parser.add_argument("--right-base", type=_parse_point)
+    parser.add_argument(
+        "--auto-base-posts",
+        action="store_true",
+        help="Seed base posts from red apparatus geometry instead of labelled points.",
+    )
+    parser.add_argument(
+        "--mediapipe-person-mask",
+        choices=("on", "off"),
+        default="on",
+        help="Use MediaPipe Pose to mask athlete pixels during auto base seeding.",
+    )
     parser.add_argument("--bar-height", type=float, required=True)
     parser.add_argument("--upright-separation", type=float, default=DEFAULT_UPRIGHT_SEPARATION_M)
     parser.add_argument("--output-json", required=True, type=Path)
@@ -1066,6 +1748,37 @@ def main() -> None:
     cv2 = _require_cv2()
     args = build_parser().parse_args()
     frame = _read_frame(args)
+    if args.auto_base_posts:
+        base_seed = auto_seed_base_posts(
+            frame,
+            use_mediapipe_person_mask=args.mediapipe_person_mask == "on",
+        )
+        left_base = base_seed.left_base_px
+        right_base = base_seed.right_base_px
+        base_seed_payload = {
+            "method": base_seed.method,
+            "left_base_px": [round(float(value), 3) for value in left_base],
+            "right_base_px": [round(float(value), 3) for value in right_base],
+            "person_bbox_px": (
+                [round(float(value), 3) for value in base_seed.person_bbox_px]
+                if base_seed.person_bbox_px is not None
+                else None
+            ),
+            "red_roi_px": [round(float(value), 3) for value in base_seed.red_roi_px],
+            "candidate_count": int(base_seed.candidate_count),
+            "mediapipe_person_mask": args.mediapipe_person_mask,
+        }
+    else:
+        if args.left_base is None or args.right_base is None:
+            raise SystemExit("provide --left-base/--right-base or use --auto-base-posts")
+        left_base = args.left_base
+        right_base = args.right_base
+        base_seed_payload = {
+            "method": "manual",
+            "left_base_px": [round(float(value), 3) for value in left_base],
+            "right_base_px": [round(float(value), 3) for value in right_base],
+        }
+
     config = BarScanConfig(
         scan_step_px=args.scan_step_px,
         band_radius_px=args.band_radius_px,
@@ -1075,8 +1788,8 @@ def main() -> None:
     )
     detection = detect_bar_from_base_posts(
         frame,
-        left_base_px=args.left_base,
-        right_base_px=args.right_base,
+        left_base_px=left_base,
+        right_base_px=right_base,
         config=config,
     )
 
@@ -1085,6 +1798,7 @@ def main() -> None:
         "bar_height_m": float(args.bar_height),
         "upright_separation_m": float(args.upright_separation),
         "points_px": detection.points_px,
+        "base_seed": base_seed_payload,
         "detection": {
             "method": "base_post_upward_red_line_scan_right_angle_refine_v2",
             "selected_bar": _candidate_payload(detection.selected_bar),

@@ -513,8 +513,11 @@ def analyse_stable_takeoff_window(
     postprocessed = postprocess_landmarks(
         calibrated,
         fps=fps,
-        config=PostProcessorConfig(enforce_segments=True),
-        height_m=height_m,
+        config=PostProcessorConfig(
+            do_segment_enforce=True,
+            height_m=height_m,
+            segment_enforce_weight=0.8,
+        ),
     )
     kinematics = compute_kinematics(postprocessed, fps, body_mass_kg)
     sample = build_sample(video_path, postprocessed, kinematics, fps, body_mass_kg, height_m)

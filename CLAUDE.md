@@ -64,6 +64,13 @@ rg -n "stationary|stationary_camera|Phase 10" memory ROADMAP.md
 
 # Smoke-test on a single video
 .venv/Scripts/python.exe scripts/analyze_jump_video.py "<video-file>"
+
+# Apparatus anchor QA frame for stable-window experiments
+.venv/Scripts/python.exe scripts/detect_stable_takeoff_anchors.py \
+    --video "<clip.mp4>" --frame-index <frame> \
+    --auto-base-posts --bar-height 1.75 \
+    --output-json data/results/stationary_validation/anchors.json \
+    --debug-image data/results/stationary_validation/anchors.jpg
 ```
 
 ## Current phase (June 2026)
@@ -114,6 +121,24 @@ Stationary pilot outcome (5 clips, 2 captures, explicitly confirmed fixed camera
   manual takeoff-window derivative as `training_grade`; the other remains
   rejected. Treat the admitted derivative as experimental takeoff-window data
   only, not a full run-up sample or independent attempt for optimiser claims.
+- Current stationary retest (2026-06-14): the approved production path
+  `scripts/analyze_jump_video.py --capture-mode stationary
+  --stationary-camera-confirmed --roi-crop on --bar-height 1.75` still admits
+  all three newer fully stationary Athlete A clips and caches all three samples.
+  This is the reliable path for extracting physics from current data.
+- Apparatus detection status (2026-06-14): the red/night stable-window detector
+  in `scripts/detect_stable_takeoff_anchors.py` can label the red apparatus and
+  now fits the landing-pad top edge independently, but it is not a general
+  daylight detector. It fails on the fully stationary daylight clips because
+  the standards/crossbar are pale and background poles dominate. The older
+  generic Hough scene-anchor detector also locks onto floodlights/background
+  poles there. Do not feed apparatus/PnP geometry into physics reports until a
+  geometry-first, colour-agnostic detector is validated visually and with tests.
+- Stable takeoff-window PnP caveat (2026-06-14): after the postprocessor API
+  fix, `scripts/analyze_stable_takeoff_window.py` runs, but current apparatus
+  camera/projectile fits on the panned takeoff-stationary clips produce
+  impossible velocities and must be treated as rejected diagnostics, not usable
+  physics.
 
 The analyser now caches only `training_grade` clips when `--save-samples` is
 supplied, records every decision in ignored `_admission_manifest.json`, and
