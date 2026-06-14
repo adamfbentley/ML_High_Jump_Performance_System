@@ -89,13 +89,6 @@ class ProjectileFitConfig:
     com_height_prior_fraction: float = 0.58
     com_height_prior_sigma_m: float = 0.30
     min_camera_depth_m: float = 0.10
-    # Soft physical cap on horizontal takeoff speed.  A single camera barely
-    # observes motion along its optical axis, so the projectile fit can run the
-    # out-of-plane velocity away to absurd values (hundreds of m/s) while still
-    # matching the image.  A hinge well above the elite band (~4-5 m/s) leaves
-    # legitimate fits untouched but removes the depth-runaway degeneracy.
-    max_horizontal_speed_mps: float = 9.0
-    horizontal_speed_penalty_sigma_mps: float = 0.75
     max_peak_com_m: float = DEFAULT_QUALITY_GATES.max_peak_com_m
     min_takeoff_horizontal_mps: float = DEFAULT_QUALITY_GATES.min_takeoff_horizontal_mps
     max_takeoff_horizontal_mps: float = DEFAULT_QUALITY_GATES.max_takeoff_horizontal_mps
@@ -105,45 +98,6 @@ class ProjectileFitConfig:
 
 
 DEFAULT_PROJECTILE_FIT_CONFIG = ProjectileFitConfig()
-
-
-@dataclass(frozen=True)
-class BarPlaneFitConfig:
-    """Settings for the bar-plane-constrained 2D projectile fit.
-
-    The free-depth 3D fit is unobservable along the camera optical axis, so it
-    runs the out-of-plane velocity away.  This solver instead assumes the CoM
-    travels in the apparatus (bar) plane: it warps the CoM pixels through the
-    image->bar-plane homography and fits a 2D gravity parabola there.  No focal
-    length / FOV assumption is needed, and the fit is well-posed.
-
-    Caveat: the recovered horizontal speed is the *in-plane* (along-bar +
-    vertical-plane) component.  For a Fosbury-flop takeoff most of the horizontal
-    velocity is along the bar at the instant of toe-off, so this captures the
-    bulk of it, but motion toward/away from the bar (depth) is not represented.
-    """
-
-    position_sigma_m: float = 0.05
-    min_fit_frames: int = 6
-    fit_window_s: float = 0.60  # post-toe-off window: long enough for valid airborne
-    # frames, short enough that the athlete stays in a roughly fronto-parallel plane.
-    max_plane_reprojection_rms_m: float = 0.20  # residual of the free-curvature fit
-    # Depth-scale gate.  The takeoff happens in a vertical plane parallel to but
-    # offset from the bar plane (the athlete is ~1 m in front of the bar), so the
-    # apparent gravity in bar-plane coords is g * k where k = Z_bar / Z_athlete.
-    # We recover k from the fitted curvature and require it to be physically
-    # plausible (athlete plane within a sane depth band of the bar plane).
-    min_depth_scale: float = 0.5
-    max_depth_scale: float = 2.5
-    max_peak_com_m: float = DEFAULT_QUALITY_GATES.max_peak_com_m
-    min_takeoff_horizontal_mps: float = DEFAULT_QUALITY_GATES.min_takeoff_horizontal_mps
-    max_takeoff_horizontal_mps: float = DEFAULT_QUALITY_GATES.max_takeoff_horizontal_mps
-    min_takeoff_angle_deg: float = DEFAULT_QUALITY_GATES.min_takeoff_angle_deg
-    max_takeoff_angle_deg: float = DEFAULT_QUALITY_GATES.max_takeoff_angle_deg
-    min_launch_vertical_mps: float = MIN_TAKEOFF_LAUNCH_VERTICAL_MPS
-
-
-DEFAULT_BAR_PLANE_FIT_CONFIG = BarPlaneFitConfig()
 
 
 def _require_cv2():
@@ -380,19 +334,10 @@ def _projectile_residuals(
     projected = project_world_points(positions, camera)
     residuals = ((projected - obs_px) / config.pixel_sigma).ravel()
 
-    # Depth-behind-camera penalty.  Always appended (zero when satisfied) so the
-    # residual vector keeps a constant length — a conditional append changes the
-    # residual dimension between iterations and breaks scipy's robust losses.
     camera_depth = world_to_camera(positions, camera)[:, 2]
     depth_penalty = np.minimum(0.0, camera_depth - config.min_camera_depth_m)
-    residuals = np.concatenate([residuals, depth_penalty / config.min_camera_depth_m])
-
-    # Soft physical cap on horizontal takeoff speed (out-of-plane degeneracy).
-    horizontal_speed = float(np.hypot(params[3], params[5]))
-    speed_excess = max(0.0, horizontal_speed - config.max_horizontal_speed_mps)
-    residuals = np.concatenate(
-        [residuals, np.array([speed_excess / config.horizontal_speed_penalty_sigma_mps])]
-    )
+    if np.any(depth_penalty < 0):
+        residuals = np.concatenate([residuals, depth_penalty / config.min_camera_depth_m])
 
     com_height_prior_m = athlete_height_m * config.com_height_prior_fraction
     residuals = np.concatenate(
@@ -502,140 +447,6 @@ def fit_projectile_to_com_pixels(
         "time_to_apex_s": round(t_apex_s, 3),
         "peak_com_height_m": round(peak_com_m, 3),
         "optimizer_cost": round(float(best.cost), 6),
-        "solver": "pnp_3d",
-    }
-
-
-def fit_bar_plane_projectile(
-    com_px: np.ndarray,
-    valid_mask: np.ndarray,
-    *,
-    takeoff_frame: int,
-    fps: float,
-    anchors: StableWindowAnchors,
-    athlete_height_m: float,
-    config: BarPlaneFitConfig = DEFAULT_BAR_PLANE_FIT_CONFIG,
-) -> dict[str, Any]:
-    """Fit a gravity parabola to the CoM warped into the apparatus (bar) plane.
-
-    Warps the post-toe-off CoM pixels through the image->bar-plane homography
-    (scene X along the crossbar, Y up) and fits ``x(t) = x0 + vx t`` and
-    ``y(t) = y0 + vy t - 1/2 g t^2`` with a robust loss.  This is well-posed
-    (no depth degeneracy) and needs no focal-length assumption.
-    """
-    cv2 = _require_cv2()
-    object_xy = apparatus_object_points(anchors.bar_height_m, anchors.upright_separation_m)[:, :2]
-    h_mat, _status = cv2.findHomography(anchors.image_points_px, object_xy, method=0)
-    if h_mat is None or not np.isfinite(h_mat).all():
-        return {
-            "accepted": False,
-            "decision_reasons": ["bar_plane_homography_failed"],
-            "solver": "bar_plane",
-            "takeoff_frame": int(takeoff_frame),
-        }
-
-    n_frames = len(com_px)
-    fit_end = min(n_frames, takeoff_frame + int(round(config.fit_window_s * fps)) + 1)
-    frame_indices = np.arange(takeoff_frame, fit_end, dtype=int)
-    frame_indices = frame_indices[valid_mask[takeoff_frame:fit_end]]
-    obs_px = np.asarray(com_px[frame_indices], dtype=np.float64)
-    finite = np.isfinite(obs_px).all(axis=1)
-    frame_indices = frame_indices[finite]
-    obs_px = obs_px[finite]
-    if len(frame_indices) < config.min_fit_frames:
-        return {
-            "accepted": False,
-            "decision_reasons": ["insufficient_fit_frames"],
-            "n_fit_frames": int(len(frame_indices)),
-            "takeoff_frame": int(takeoff_frame),
-            "solver": "bar_plane",
-        }
-
-    scene = cv2.perspectiveTransform(
-        obs_px.reshape(-1, 1, 2), np.asarray(h_mat, dtype=np.float64)
-    ).reshape(-1, 2)
-    times = (frame_indices - takeoff_frame) / float(fps)
-
-    # Fit x(t)=x0+vx t and y(t)=y0+vy_b t + a t^2 with a FREE quadratic
-    # coefficient.  ``a = -1/2 g_apparent``; the apparent gravity in bar-plane
-    # coords is g times the depth scale k = Z_bar/Z_athlete, so the curvature
-    # recovers k and hence the true metric scale (gravity-as-scale, with the
-    # apparatus fixing the plane orientation that defeated raw gravity-mpp).
-    vx0 = float(np.polyfit(times, scene[:, 0], 1)[0]) if np.ptp(times) > 1e-9 else 0.0
-    y_quad = np.polyfit(times, scene[:, 1], 2) if len(times) >= 3 else None
-    if y_quad is not None:
-        a0, vy0, y0_0 = float(y_quad[0]), float(y_quad[1]), float(y_quad[2])
-    else:
-        a0, vy0, y0_0 = -0.5 * GRAVITY_MPS2, 3.0, float(scene[0, 1])
-    x0_0 = float(scene[0, 0])
-
-    def _residuals(params: np.ndarray) -> np.ndarray:
-        x0, vx, y0, vy_b, a = params
-        model_x = x0 + vx * times
-        model_y = y0 + vy_b * times + a * times**2
-        return np.concatenate([model_x - scene[:, 0], model_y - scene[:, 1]]) / config.position_sigma_m
-
-    best = least_squares(
-        _residuals,
-        np.array([x0_0, vx0, y0_0, vy0, a0], dtype=np.float64),
-        loss="soft_l1",
-        f_scale=1.0,
-        max_nfev=2000,
-    )
-    x0, vx, y0, vy_b, a = (float(v) for v in best.x)
-    model_x = x0 + vx * times
-    model_y = y0 + vy_b * times + a * times**2
-    reproj_rms_m = float(np.sqrt(np.mean((model_x - scene[:, 0]) ** 2 + (model_y - scene[:, 1]) ** 2)))
-
-    # Recover the depth scale from the fitted curvature.
-    g_apparent = -2.0 * a
-    depth_scale = g_apparent / GRAVITY_MPS2  # k = Z_bar / Z_athlete
-
-    failures: list[str] = []
-    if reproj_rms_m > config.max_plane_reprojection_rms_m:
-        failures.append("bar_plane_reprojection_high")
-    if not (config.min_depth_scale <= depth_scale <= config.max_depth_scale):
-        # Includes g_apparent <= 0 (not a downward parabola): window not ballistic.
-        failures.append("depth_scale_out_of_range")
-
-    # Angle is scale-invariant; metric velocities are the bar-plane values / k.
-    k = depth_scale if depth_scale > 1e-6 else float("nan")
-    vh_true = abs(vx) / k
-    vv_true = vy_b / k
-    angle_deg = float(np.degrees(np.arctan2(vy_b, max(abs(vx), 1e-6))))
-    t_apex_s = max(0.0, vv_true / GRAVITY_MPS2)
-    com_takeoff_m = y0 / k
-    peak_com_m = float(com_takeoff_m + vv_true * t_apex_s - 0.5 * GRAVITY_MPS2 * t_apex_s**2)
-
-    if np.isfinite(vv_true) and vv_true < config.min_launch_vertical_mps:
-        failures.append("launch_vertical_below_threshold")
-    if not (config.min_takeoff_horizontal_mps <= vh_true <= config.max_takeoff_horizontal_mps):
-        failures.append("takeoff_horizontal_out_of_range")
-    if not (config.min_takeoff_angle_deg <= angle_deg <= config.max_takeoff_angle_deg):
-        failures.append("takeoff_angle_out_of_range")
-    if np.isfinite(peak_com_m) and peak_com_m > config.max_peak_com_m:
-        failures.append("peak_com_above_guardrail")
-
-    return {
-        "accepted": not failures,
-        "decision_reasons": failures,
-        "solver": "bar_plane",
-        "n_fit_frames": int(len(frame_indices)),
-        "fit_frame_start": int(frame_indices[0]),
-        "fit_frame_end": int(frame_indices[-1]),
-        "fit_window_s": round(float(times[-1]), 3),
-        "takeoff_frame": int(takeoff_frame),
-        "bar_plane_reprojection_rms_m": round(reproj_rms_m, 4),
-        "apparent_gravity_mps2": round(g_apparent, 3),
-        "depth_scale_k": round(depth_scale, 4),
-        "takeoff_horizontal_mps": round(vh_true, 3) if np.isfinite(vh_true) else None,
-        "takeoff_horizontal_is_inplane_only": True,
-        "takeoff_vertical_mps": round(vv_true, 3) if np.isfinite(vv_true) else None,
-        "takeoff_angle_deg": round(angle_deg, 2),
-        "time_to_apex_s": round(t_apex_s, 3),
-        "com_takeoff_height_m": round(com_takeoff_m, 3) if np.isfinite(com_takeoff_m) else None,
-        "peak_com_height_m": round(peak_com_m, 3) if np.isfinite(peak_com_m) else None,
-        "optimizer_cost": round(float(best.cost), 6),
     }
 
 
@@ -681,8 +492,6 @@ def analyse_stable_takeoff_window(
     focal_length_px: float | None,
     fov_deg: float,
     focal_sweep: str | None,
-    solver: str = "bar_plane",
-    bar_plane_window_s: float = DEFAULT_BAR_PLANE_FIT_CONFIG.fit_window_s,
 ) -> dict[str, Any]:
     """Run the stable-window physics analysis for one video."""
     landmarks_2d, landmarks_3d_world, fps, width, height = extract_poses(
@@ -723,52 +532,31 @@ def analyse_stable_takeoff_window(
 
     valid_mask = key_joint_valid_mask(landmarks_2d)
     com_px = com_pixel_trajectory(landmarks_2d, width, height)
-
-    fits: list[dict[str, Any]] = []
-    focal_sweep_block: dict[str, Any] | None = None
-    if solver == "bar_plane":
-        # Well-posed primary path: no focal-length/FOV assumption, no depth
-        # degeneracy.  Focal sweep is meaningless here.
-        best_fit = fit_bar_plane_projectile(
+    fits = []
+    for focal in _focal_sweep_values(base_focal, focal_sweep):
+        camera = solve_camera_from_anchors(
+            anchors,
+            image_width=width,
+            image_height=height,
+            focal_length_px=focal,
+        )
+        fit = fit_projectile_to_com_pixels(
             com_px,
             valid_mask,
             takeoff_frame=takeoff_frame,
             fps=fps,
+            camera=camera,
             anchors=anchors,
             athlete_height_m=height_m,
-            config=BarPlaneFitConfig(fit_window_s=bar_plane_window_s),
         )
-    else:
-        for focal in _focal_sweep_values(base_focal, focal_sweep):
-            camera = solve_camera_from_anchors(
-                anchors,
-                image_width=width,
-                image_height=height,
-                focal_length_px=focal,
-            )
-            fits.append(
-                fit_projectile_to_com_pixels(
-                    com_px,
-                    valid_mask,
-                    takeoff_frame=takeoff_frame,
-                    fps=fps,
-                    camera=camera,
-                    anchors=anchors,
-                    athlete_height_m=height_m,
-                )
-            )
-        complete_fits = [fit for fit in fits if "projectile_reprojection_rms_px" in fit]
-        best_fit = min(
-            complete_fits,
-            key=lambda fit: fit["projectile_reprojection_rms_px"],
-            default=fits[0],
-        )
-        focal_sweep_block = {
-            "base_focal_length_px": round(float(base_focal), 3),
-            "fits": fits,
-            "summary": _summarise_sweep(fits),
-        }
+        fits.append(fit)
 
+    complete_fits = [fit for fit in fits if "projectile_reprojection_rms_px" in fit]
+    best_fit = min(
+        complete_fits,
+        key=lambda fit: fit["projectile_reprojection_rms_px"],
+        default=fits[0],
+    )
     quality_failures = list(best_fit.get("decision_reasons", []))
     if not contact_detected:
         quality_failures.append("no_contact_interval")
@@ -806,9 +594,12 @@ def analyse_stable_takeoff_window(
             "takeoff_anchor_review_passed": bool(anchor_ok),
             "takeoff_frame_override_used": takeoff_frame_override is not None,
         },
-        "solver": solver,
         "projectile_fit": best_fit,
-        "focal_sweep": focal_sweep_block,
+        "focal_sweep": {
+            "base_focal_length_px": round(float(base_focal), 3),
+            "fits": fits,
+            "summary": _summarise_sweep(fits),
+        },
         "quality": {
             "accepted_takeoff_window_physics": not quality_failures,
             "failures": quality_failures,
@@ -837,20 +628,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--focal-sweep",
         default="0.85,1.0,1.15",
-        help="Comma-separated focal-length factors for uncertainty/sensitivity (pnp_3d only).",
-    )
-    parser.add_argument(
-        "--solver",
-        choices=("bar_plane", "pnp_3d"),
-        default="bar_plane",
-        help="bar_plane: apparatus-plane 2D gravity fit (well-posed, default). "
-             "pnp_3d: legacy free-depth fit (degenerate along the camera axis).",
-    )
-    parser.add_argument(
-        "--bar-plane-window-s",
-        type=float,
-        default=DEFAULT_BAR_PLANE_FIT_CONFIG.fit_window_s,
-        help="Post-toe-off fit window (s) for the bar_plane solver.",
+        help="Comma-separated focal-length factors for uncertainty/sensitivity.",
     )
     return parser
 
@@ -871,8 +649,6 @@ def main() -> None:
         focal_length_px=args.focal_length_px,
         fov_deg=args.fov_deg,
         focal_sweep=args.focal_sweep,
-        solver=args.solver,
-        bar_plane_window_s=args.bar_plane_window_s,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2), encoding="utf-8")
