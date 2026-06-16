@@ -5,9 +5,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from scripts.analyze_stable_takeoff_window import (
+    BarPlaneFitConfig,
     CameraModel,
     StableWindowAnchors,
     apparatus_object_points,
+    fit_bar_plane_projectile,
     fit_projectile_to_com_pixels,
     project_world_points,
     solve_camera_from_anchors,
@@ -95,3 +97,59 @@ def test_fit_projectile_to_com_pixels_recovers_launch_velocity():
         abs=0.20,
     )
     assert fit["takeoff_angle_deg"] == pytest.approx(47.6, abs=1.5)
+
+
+def test_fit_bar_plane_projectile_recovers_inplane_launch_velocity():
+    camera = _synthetic_camera()
+    anchors = _anchors_from_camera(camera)
+    fps = 60.0
+    takeoff_frame = 3
+    n_frames = 30
+    frame_indices = np.arange(n_frames)
+    times = (frame_indices - takeoff_frame) / fps
+
+    # An in-plane (Z=0, the apparatus plane) gravity parabola: X along the bar,
+    # Y up. The bar-plane solver should recover vx and vy without any depth/focal
+    # information.
+    x0, y0 = -0.40, 1.05
+    vx_true, vy_true = 2.6, 3.2
+    world = np.zeros((n_frames, 3), dtype=float)
+    world[:, 0] = x0 + vx_true * times
+    world[:, 1] = y0 + vy_true * times - 0.5 * 9.81 * times**2
+    world[:, 2] = 0.0
+    com_px = project_world_points(world, camera)
+    valid = np.ones(n_frames, dtype=bool)
+
+    fit = fit_bar_plane_projectile(
+        com_px,
+        valid,
+        takeoff_frame=takeoff_frame,
+        fps=fps,
+        anchors=anchors,
+        athlete_height_m=1.75,
+        config=BarPlaneFitConfig(fit_window_s=0.4),
+    )
+
+    assert fit["solver"] == "bar_plane"
+    assert fit["accepted"] is True
+    assert fit["bar_plane_reprojection_rms_m"] < 0.02
+    assert fit["takeoff_vertical_mps"] == pytest.approx(vy_true, abs=0.1)
+    assert fit["takeoff_horizontal_mps"] == pytest.approx(vx_true, abs=0.1)
+    assert fit["takeoff_angle_deg"] == pytest.approx(
+        float(np.degrees(np.arctan2(vy_true, vx_true))), abs=1.0
+    )
+
+
+def test_fit_bar_plane_projectile_rejects_too_few_frames():
+    camera = _synthetic_camera()
+    anchors = _anchors_from_camera(camera)
+    com_px = np.full((8, 2), np.nan)
+    com_px[3:5] = [640.0, 360.0]
+    valid = np.zeros(8, dtype=bool)
+    valid[3:5] = True
+
+    fit = fit_bar_plane_projectile(
+        com_px, valid, takeoff_frame=3, fps=60.0, anchors=anchors, athlete_height_m=1.75
+    )
+    assert fit["accepted"] is False
+    assert "insufficient_fit_frames" in fit["decision_reasons"]

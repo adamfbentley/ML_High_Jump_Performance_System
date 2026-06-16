@@ -694,6 +694,34 @@ apparatus/PnP projectile fits still produce impossible velocities and are
 rejected diagnostics only. Do not use them for optimiser claims or training
 samples.
 
+**Moving-footage takeoff workstream (2026-06-14).** A push to extract takeoff
+physics from the panned corpus (`memory/plans/moving_footage_physics_plan.md`).
+Three pieces landed, each with synthetic tests (128 suite green):
+
+- `src/pose_estimation/apparatus_detector.py` — geometry-first, colour-agnostic
+  apparatus detector. Admits an upright pair only with a crossbar/landing-pad
+  relationship, so background floodlight masts are rejected. Reproduces the
+  night-red anchors without using red; on the daylight stationary clips it is
+  ~1/3 reliable (one clean, one wrong substructure, one missed) — a real
+  improvement over the red/Hough detectors but not yet admission-grade.
+- `src/pose_estimation/camera_motion.py` — background camera-motion estimation
+  and takeoff-window stabilization. Empirical finding: nearly every match clip
+  has a long stable window, but it is the *static wide shot before the run-up*;
+  the takeoff happens later where the camera pans/zooms. So the window must be
+  centred on the detected toe-off, and **stabilization, not stillness, is the
+  enabler** — a ~6 px/frame panning takeoff window registers to a reference at
+  sub-pixel residual (mean 0.24 px). `scripts/analyze_moving_takeoff.py` chains
+  pose -> toe-off -> stabilize -> remap CoM -> apparatus -> solve.
+- **Physics root-cause finding.** The "impossible velocities" are a *solver*
+  degeneracy, not detection: the free-depth 3D projectile fit is unobservable
+  along the camera optical axis, so out-of-plane velocity runs away (vh ~ 662
+  m/s even on the stationary IMG_4829/4830). Fixed a residual-length bug in
+  `_projectile_residuals` and added a soft horizontal-speed cap. The validated
+  remedy is a **bar-plane-constrained 2D gravity fit** (warp CoM through the
+  apparatus-plane homography): on IMG_4829 it yields ~40-46 deg, vh 2-4 m/s vs
+  the 3D fit's -60 deg. Implementing that planar solver as the primary physics
+  path, with a robust toe-off frame and short post-toe-off window, is next.
+
 ### Phase 11 — Validation and Paper
 
 - Compare predicted vs. measured jump heights on held-out attempts.

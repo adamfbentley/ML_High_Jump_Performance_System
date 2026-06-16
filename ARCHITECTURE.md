@@ -85,6 +85,20 @@ services_scaffold/      Parked deployment scaffolding, not part of research pipe
 - `scene_calibration.py`: Phase 9c Hough-based upright/crossbar detection and
   per-frame scene homography. Retained as historical panned-footage rescue
   infrastructure; the automatic detector is unreliable on those clips.
+- `apparatus_detector.py`: geometry-first, **colour-agnostic** high-jump
+  apparatus detector (standards / crossbar / landing-pad). Admits an upright
+  pair only when it has a crossbar/pad relationship, so isolated background
+  floodlight masts are rejected; colour is additive-only evidence. Reproduces
+  the night-red anchors without requiring red; partial on daylight clips.
+  `detect_apparatus_geometry_stable` aggregates detections across frames. CLI:
+  `scripts/detect_apparatus_geometry.py`.
+- `camera_motion.py`: background (camera) motion estimation and **takeoff-window
+  stabilization**. `estimate_camera_motion`/`find_stable_window` give a per-frame
+  background-displacement signal; `stabilize_window` registers a window to a
+  reference frame via background homography (athlete masked) and remaps
+  landmarks, turning a panning/zooming takeoff window into an effectively
+  stationary one. CLI: `scripts/scan_stable_windows.py`. See
+  `memory/plans/moving_footage_physics_plan.md`.
 - `egomotion.py`: Phase 9c background optical-flow camera-motion compensation.
   Retained as historical panned-footage rescue infrastructure. It recovers much
   of the panning component but does not close the translational-scale gap.
@@ -222,7 +236,10 @@ be trusted.
 | `scripts/render_pose_overlay.py` | Render pose overlays for inspection. |
 | `scripts/create_takeoff_focus_clips.py` | Create ignored, static-crop derivative clips around takeoff/flight for current-footage rescue experiments. |
 | `scripts/detect_stable_takeoff_anchors.py` | Experimental one-frame apparatus anchor detector for stable takeoff-window review; currently reliable only for the red/night apparatus clips, not daylight stationary footage. |
-| `scripts/analyze_stable_takeoff_window.py` | Experimental takeoff-window-only apparatus/PnP projectile fitter for panned-run-up clips with stationary final steps; diagnostic only until apparatus camera fits are validated. |
+| `scripts/detect_apparatus_geometry.py` | Geometry-first, colour-agnostic apparatus detector (single frame or temporal). Rejects background poles via the crossbar/pad relationship; partial on daylight clips. |
+| `scripts/scan_stable_windows.py` | Scan clips for background camera motion and report the takeoff stable window. NB: the *longest* still run is usually the pre-run-up standstill, not the takeoff. |
+| `scripts/analyze_stable_takeoff_window.py` | Experimental takeoff-window-only apparatus/PnP projectile fitter for panned-run-up clips with stationary final steps; diagnostic only — the free-depth 3D fit is degenerate (see plan), a bar-plane fit is the validated remedy. |
+| `scripts/analyze_moving_takeoff.py` | End-to-end moving-footage takeoff: detect toe-off, stabilize a takeoff-centred window, remap CoM, detect/solve apparatus, fit projectile. Diagnostic until the bar-plane solver lands. |
 
 ## Local Agent Memory
 
