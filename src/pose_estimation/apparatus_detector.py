@@ -98,6 +98,17 @@ class ApparatusConfig:
     # --- landing-pad relationship ---
     min_pad_gap_frac: float = 0.10  # pad must be this far below bar (of post len)
     min_pad_span_frac: float = 0.45  # pad x-extent / separation
+    min_pad_bottom_gap_frac: float = 0.10  # pad bottom below pad top by this * post len
+
+    # --- pad/bar vertical-ratio prior ---
+    # The image ratio (bar->pad-top) / (bar->pad-bottom) is ~scale-free and
+    # perspective-tolerant, and equals 1 - H_pad/H_bar in world heights.  A real
+    # apparatus has this triple at the expected ratio; a background building with
+    # an apparatus-shaped roofline does not, so this discriminates them.
+    expected_pad_height_m: float = 0.70  # competition landing-area top height
+    pad_ratio_deadzone: float = 0.22  # no penalty within +/- this of the expected ratio
+    pad_ratio_sigma: float = 0.14  # ramp width of the penalty beyond the dead-zone
+    w_pad_ratio: float = 5.0
 
     # --- scoring weights ---
     w_crossbar: float = 6.0
@@ -175,6 +186,9 @@ class ApparatusDetection:
     confidence: float
     left_post: PostCandidate
     right_post: PostCandidate
+    pad_bottom: HorizontalSegment | None = None
+    pad_ratio: float | None = None
+    pad_ratio_expected: float | None = None
 
     def points_px(self) -> dict[str, list[float]]:
         return {
@@ -521,22 +535,29 @@ def _find_crossbar(
     return seg, support, left_top, right_top
 
 
-def _find_pad_top(
+def _find_pad_lines(
     left: PostCandidate,
     right: PostCandidate,
     horizontals: list[HorizontalSegment],
     *,
     bar_y: float | None,
     config: ApparatusConfig,
-) -> tuple[HorizontalSegment | None, float]:
-    """Find a landing-pad top edge: a long horizontal below the bar/top region.
+) -> tuple[HorizontalSegment | None, float, HorizontalSegment | None, HorizontalSegment | None]:
+    """Find the landing-pad edges spanning the uprights below the bar region.
 
-    The pad edge need not be parallel to the bar; it is a separate perspective
-    cue near the mat between the uprights.
+    Returns ``(pad, pad_support, top_line, bottom_line)`` where:
+
+    * ``pad`` / ``pad_support`` are the **best-supported** qualifying horizontal
+      (the pad edge used for ``has_pad`` and the pad score term — identical
+      semantics to the original detector, so selection is unchanged); and
+    * ``top_line`` / ``bottom_line`` are the **highest** and **lowest** qualifying
+      horizontals (the latter clearly below the former), used only for the
+      bar/pad vertical-ratio prior.  ``bottom_line`` is ``None`` when no distinct
+      lower edge exists.
     """
     separation = abs(right.x_base_px - left.x_base_px)
     if separation <= 1.0:
-        return None, 0.0
+        return None, 0.0, None, None
     length = float(min(left.length_px, right.length_px))
     y_top = min(left.y_top_px, right.y_top_px)
     y_base = max(left.y_base_px, right.y_base_px)
@@ -548,7 +569,7 @@ def _find_pad_top(
     min_span = config.min_pad_span_frac * separation
     max_overhang = config.max_bar_overhang_frac * separation
 
-    best: tuple[float, HorizontalSegment] | None = None
+    candidates: list[tuple[float, float, HorizontalSegment]] = []  # (y_center, support, seg)
     for h in horizontals:
         y_c = h.y_center_px
         if not (pad_min_y <= y_c <= pad_max_y):
@@ -561,11 +582,22 @@ def _find_pad_top(
         if max(0.0, lo_x - h.x_left_px) > max_overhang or max(0.0, h.x_right_px - hi_x) > max_overhang:
             continue
         support = float(h.length_px * (overlap / separation))
-        if best is None or support > best[0]:
-            best = (support, h)
-    if best is None:
-        return None, 0.0
-    return best[1], best[0]
+        candidates.append((y_c, support, h))
+    if not candidates:
+        return None, 0.0, None, None
+
+    # Best-support pad edge (unchanged behaviour for has_pad / scoring).
+    best_support, best_seg = max(((s, seg) for _, s, seg in candidates), key=lambda c: c[0])
+    # Highest and lowest qualifying lines for the ratio triple.
+    candidates.sort(key=lambda c: c[0])
+    top_y, _ts, top_seg = candidates[0]
+    min_bottom_gap = config.min_pad_bottom_gap_frac * length
+    bottom_seg: HorizontalSegment | None = None
+    for y_c, _support, seg in reversed(candidates):
+        if y_c - top_y >= min_bottom_gap:
+            bottom_seg = seg
+            break
+    return best_seg, best_support, top_seg, bottom_seg
 
 
 # --------------------------------------------------------------------------- #
@@ -623,6 +655,7 @@ def _score_pair(
     width: int,
     height: int,
     athlete_center_x: float | None,
+    bar_height_m: float | None = None,
 ) -> ApparatusDetection | None:
     separation = abs(right.x_base_px - left.x_base_px)
     min_sep = config.min_separation_frac * width
@@ -643,7 +676,9 @@ def _score_pair(
     bar_y = None
     if crossbar is not None and bar_left_top is not None and bar_right_top is not None:
         bar_y = float((bar_left_top[1] + bar_right_top[1]) / 2.0)
-    pad, pad_support = _find_pad_top(left, right, horizontals, bar_y=bar_y, config=config)
+    pad, pad_support, pad_top_line, pad_bottom_line = _find_pad_lines(
+        left, right, horizontals, bar_y=bar_y, config=config
+    )
 
     has_crossbar = crossbar is not None
     has_pad = pad is not None
@@ -689,6 +724,30 @@ def _score_pair(
     if has_crossbar:
         score += _bar_colour_bonus(frame_bgr, left_top, right_top, config)
 
+    # Pad/bar vertical-ratio prior: the image ratio (bar->pad-top)/(bar->pad-bottom)
+    # should match 1 - H_pad/H_bar.  Used as a PENALTY only — a triple at the
+    # expected ratio costs nothing, a clearly wrong ratio is penalised.  This
+    # rejects an apparatus-shaped background building (whose roofline/ground triple
+    # has the wrong ratio) WITHOUT rewarding — and thereby promoting — any wide
+    # pair that happens to form a near-correct triple.
+    pad_ratio: float | None = None
+    pad_ratio_expected: float | None = None
+    if (
+        has_crossbar and bar_y is not None
+        and pad_top_line is not None and pad_bottom_line is not None
+    ):
+        top_gap = pad_top_line.y_center_px - bar_y
+        full_gap = pad_bottom_line.y_center_px - bar_y
+        if full_gap > 1.0 and top_gap > 0.0:
+            pad_ratio = float(top_gap / full_gap)
+            if bar_height_m is not None and bar_height_m > 0.0:
+                pad_ratio_expected = float(
+                    max(0.05, min(0.95, 1.0 - config.expected_pad_height_m / bar_height_m))
+                )
+                excess = max(0.0, abs(pad_ratio - pad_ratio_expected) - config.pad_ratio_deadzone)
+                match = float(np.exp(-(excess ** 2) / (2.0 * config.pad_ratio_sigma ** 2)))
+                score -= config.w_pad_ratio * (1.0 - match)
+
     # --- confidence in [0, 1] ---
     confidence = 0.0
     confidence += 0.45 if has_crossbar else 0.0
@@ -696,6 +755,11 @@ def _score_pair(
     confidence += 0.15 * height_ratio
     confidence += 0.10 * float(np.tanh(bar_support / max(1.0, 0.5 * separation)))
     confidence += 0.10 * max(0.0, 1.0 - (left.mean_angle_from_vertical_deg + right.mean_angle_from_vertical_deg) / 24.0)
+    # A clearly wrong pad/bar ratio is evidence *against* a real apparatus.
+    if pad_ratio is not None and pad_ratio_expected is not None:
+        excess = max(0.0, abs(pad_ratio - pad_ratio_expected) - config.pad_ratio_deadzone)
+        match = float(np.exp(-(excess ** 2) / (2.0 * config.pad_ratio_sigma ** 2)))
+        confidence -= 0.25 * (1.0 - match)
     confidence = float(np.clip(confidence, 0.0, 1.0))
 
     return ApparatusDetection(
@@ -712,6 +776,9 @@ def _score_pair(
         confidence=confidence,
         left_post=left,
         right_post=right,
+        pad_bottom=pad_bottom_line,
+        pad_ratio=pad_ratio,
+        pad_ratio_expected=pad_ratio_expected,
     )
 
 
@@ -719,6 +786,8 @@ def detect_apparatus_geometry(
     frame_bgr: np.ndarray,
     *,
     athlete_bbox_px: Sequence[float] | None = None,
+    athlete_center_x_px: float | None = None,
+    bar_height_m: float | None = None,
     config: ApparatusConfig = ApparatusConfig(),
 ) -> ApparatusDetection | None:
     """Detect high-jump apparatus anchors from frame geometry (colour-agnostic).
@@ -729,6 +798,14 @@ def detect_apparatus_geometry(
             inside it are dropped (so the jumper is never mistaken for a post),
             and its horizontal centre biases pair selection toward the takeoff
             apparatus.  Pass ``None`` to detect without a pose hint.
+        athlete_center_x_px: Optional takeoff-zone bias *without* masking, for
+            athlete-free inputs such as a synthesized static plate (the jumper is
+            already gone, and at apex the bbox would overlap — and wrongly mask —
+            the crossbar).  Ignored when ``athlete_bbox_px`` is given.
+        bar_height_m: Optional known crossbar height (m).  When given, the
+            pad/bar vertical-ratio prior is active and rewards pairs whose
+            (bar->pad-top)/(bar->pad-bottom) image ratio matches ``1 - H_pad/H_bar``
+            — the main discriminator against apparatus-shaped background buildings.
         config: Tuning parameters.
 
     Returns:
@@ -751,6 +828,8 @@ def detect_apparatus_geometry(
     athlete_center_x: float | None = None
     if athlete_bbox_px is not None:
         athlete_center_x = float((athlete_bbox_px[0] + athlete_bbox_px[2]) / 2.0)
+    elif athlete_center_x_px is not None:
+        athlete_center_x = float(athlete_center_x_px)
 
     best: ApparatusDetection | None = None
     for i, left in enumerate(posts):
@@ -764,6 +843,7 @@ def detect_apparatus_geometry(
                 width=width,
                 height=height,
                 athlete_center_x=athlete_center_x,
+                bar_height_m=bar_height_m,
             )
             if detection is None:
                 continue
@@ -782,6 +862,7 @@ def detect_apparatus_geometry_stable(
     frames: Sequence[np.ndarray],
     *,
     athlete_bboxes: Sequence[Sequence[float] | None] | None = None,
+    bar_height_m: float | None = None,
     config: ApparatusConfig = ApparatusConfig(),
 ) -> StableApparatusDetection:
     """Aggregate apparatus geometry across multiple stationary frames.
@@ -803,7 +884,11 @@ def detect_apparatus_geometry_stable(
         bbox = None
         if athlete_bboxes is not None and idx < len(athlete_bboxes):
             bbox = athlete_bboxes[idx]
-        per_frame.append(detect_apparatus_geometry(frame, athlete_bbox_px=bbox, config=config))
+        per_frame.append(
+            detect_apparatus_geometry(
+                frame, athlete_bbox_px=bbox, bar_height_m=bar_height_m, config=config
+            )
+        )
 
     detected = [d for d in per_frame if d is not None]
     sep_tol = config.stable_separation_tol_frac * width
@@ -908,6 +993,17 @@ def draw_apparatus_debug(
             2,
             cv2.LINE_AA,
         )
+    # Pad-bottom / ground line (magenta) — the third line of the ratio triple.
+    if detection.pad_bottom is not None:
+        pb = detection.pad_bottom
+        cv2.line(
+            out,
+            (int(round(pb.x_left_px)), int(round(pb.y_left_px))),
+            (int(round(pb.x_right_px)), int(round(pb.y_right_px))),
+            (255, 0, 200),
+            2,
+            cv2.LINE_AA,
+        )
 
     colours = {
         "left_base": (0, 255, 0),
@@ -929,6 +1025,10 @@ def draw_apparatus_debug(
         f"sep={detection.separation_px:.0f}px score={detection.score:.2f} "
         f"conf={detection.confidence:.2f} crossbar={detection.has_crossbar} pad={detection.has_pad}",
     ]
+    if detection.pad_ratio is not None:
+        exp = detection.pad_ratio_expected
+        exp_txt = f" exp={exp:.2f}" if exp is not None else ""
+        lines.append(f"pad/bar ratio={detection.pad_ratio:.2f}{exp_txt} (bar/pad-top/pad-bottom)")
     if extra_label:
         lines.append(extra_label)
     y = 34

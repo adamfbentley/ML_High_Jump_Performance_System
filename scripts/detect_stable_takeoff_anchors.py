@@ -46,6 +46,37 @@ class BarScanConfig:
     max_refined_bar_abs_slope: float = 0.12
     min_refined_bar_length_px: float = 80.0
 
+    # --- bar response weighting (mode-dependent) ---
+    # "red" mode (default, night clips): the crossbar is red, so the response is
+    # dominated by the red channel and the selected bar must be strongly
+    # red-supported.  "edge" mode (daylight clips): the crossbar is a thin dark
+    # line against the sky, so the response uses an edge + dark-horizontal-line
+    # cue and drops the red requirement.  Defaults reproduce the original red
+    # behaviour exactly (dark_line_weight=0, require_red=True).
+    red_weight: float = 0.62
+    edge_weight: float = 0.38
+    dark_line_weight: float = 0.0
+    dark_line_band_px: int = 6
+    require_red: bool = True
+    # Optional pose-derived bar-height prior (image y, full frame).  In edge mode,
+    # the crossbar is selected as the coverage-meeting candidate closest to this
+    # y, rather than the first strong horizontal above the pad (which on daylight
+    # is the landing-mat top edge, not the faint crossbar).
+    bar_y_prior_px: float | None = None
+    bar_y_prior_tol_px: float = 90.0
+
+    @classmethod
+    def edge_mode(cls, **overrides) -> "BarScanConfig":
+        """Daylight preset: edge + dark-horizontal-line cue, no red requirement."""
+        params = dict(
+            red_weight=0.0,
+            edge_weight=0.5,
+            dark_line_weight=0.5,
+            require_red=False,
+        )
+        params.update(overrides)
+        return cls(**params)
+
 
 @dataclass(frozen=True)
 class LineCandidate:
@@ -226,7 +257,7 @@ def _candidate_clusters(
         candidate
         for candidate in candidates
         if candidate.coverage >= config.min_bin_coverage
-        and candidate.red_coverage >= config.min_red_bin_coverage
+        and (not config.require_red or candidate.red_coverage >= config.min_red_bin_coverage)
     ]
     if not usable:
         return []
@@ -1426,9 +1457,21 @@ def detect_bar_from_base_posts(
     red = np.maximum(0.0, r - 0.70 * g - 0.45 * b)
     red = cv2.GaussianBlur(red, (3, 3), 0)
 
+    # Dark horizontal-line cue (for daylight): a thin dark bar sits between two
+    # brighter rows (sky), so it is darker than its vertical neighbours.
+    d = max(1, int(config.dark_line_band_px))
+    above = np.roll(gray, d, axis=0)
+    below = np.roll(gray, -d, axis=0)
+    dark_line = np.maximum(0.0, 0.5 * (above + below) - gray)
+
     red_norm = _normalise_map(red, mask)
     edge_norm = _normalise_map(edge, mask)
-    response = 0.62 * red_norm + 0.38 * edge_norm
+    dark_norm = _normalise_map(dark_line, mask)
+    response = (
+        config.red_weight * red_norm
+        + config.edge_weight * edge_norm
+        + config.dark_line_weight * dark_norm
+    )
 
     response_threshold = max(0.22, float(np.percentile(response[mask], 82)))
     red_threshold = max(0.18, float(np.percentile(red_norm[mask], 78)))
@@ -1473,7 +1516,11 @@ def detect_bar_from_base_posts(
 
     clustered = _candidate_clusters(candidates, config=config)
     if not clustered:
-        raise RuntimeError("No red-supported horizontal line candidates found above base posts")
+        raise RuntimeError(
+            "No red-supported horizontal line candidates found above base posts"
+            if config.require_red
+            else "No horizontal line candidates found above base posts"
+        )
 
     clustered.sort(key=lambda candidate: candidate.y_center_px, reverse=True)
     pad_top = clustered[0]
@@ -1493,31 +1540,54 @@ def detect_bar_from_base_posts(
     # stable red/horizontal structure, not the highest red feature in the frame.
     strong_min_coverage = max(config.min_bin_coverage, 0.65)
     strong_min_red_coverage = max(config.min_red_bin_coverage, 0.65)
-    selected_bar = max(
-        bar_pool,
-        key=lambda candidate: (
-            candidate.red_coverage >= strong_min_red_coverage
-            and candidate.coverage >= strong_min_coverage,
-            candidate.y_center_px,
-            candidate.red_coverage,
-            candidate.coverage,
-            candidate.score,
-        ),
-    )
-    if (
-        selected_bar.red_coverage < strong_min_red_coverage
-        or selected_bar.coverage < strong_min_coverage
-    ):
-        raise RuntimeError(
-            "No strongly red-supported crossbar candidate found above the pad; "
-            "try a clearer stable frame"
+
+    if config.require_red:
+        # Night/red apparatus: the bar must be strongly red-supported.
+        def _meets_strong(c: LineCandidate) -> bool:
+            return c.red_coverage >= strong_min_red_coverage and c.coverage >= strong_min_coverage
+
+        selected_bar = max(
+            bar_pool,
+            key=lambda c: (_meets_strong(c), c.y_center_px, c.red_coverage, c.coverage, c.score),
         )
-    refined = _fit_local_red_bar_line(
-        frame,
-        left_base_px=left,
-        right_base_px=right,
-        initial_bar=selected_bar,
-        config=config,
+        if not _meets_strong(selected_bar):
+            raise RuntimeError(
+                "No strongly red-supported crossbar candidate found above the pad; "
+                "try a clearer stable frame"
+            )
+    else:
+        # Daylight/edge apparatus: select on combined-response coverage only.
+        meeting = [c for c in bar_pool if c.coverage >= strong_min_coverage]
+        if not meeting:
+            # Relax once: take the best-covered candidates so a faint bar is not lost.
+            meeting = sorted(bar_pool, key=lambda c: c.coverage, reverse=True)[:5]
+        if not meeting:
+            raise RuntimeError(
+                "No supported crossbar candidate found above the pad; "
+                "try a clearer stable frame"
+            )
+        if config.bar_y_prior_px is not None:
+            # Prefer the candidate nearest the pose-predicted bar height; the
+            # landing-mat top edge is a stronger but lower (wrong) horizontal.
+            near = [c for c in meeting
+                    if abs(c.y_center_px - config.bar_y_prior_px) <= config.bar_y_prior_tol_px]
+            pool_for_prior = near if near else meeting
+            selected_bar = min(
+                pool_for_prior, key=lambda c: abs(c.y_center_px - config.bar_y_prior_px)
+            )
+        else:
+            selected_bar = max(meeting, key=lambda c: (c.y_center_px, c.coverage, c.score))
+
+    refined = (
+        _fit_local_red_bar_line(
+            frame,
+            left_base_px=left,
+            right_base_px=right,
+            initial_bar=selected_bar,
+            config=config,
+        )
+        if config.require_red
+        else None
     )
     if refined is None:
         refined_left_base = left
@@ -1729,6 +1799,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use MediaPipe Pose to mask athlete pixels during auto base seeding.",
     )
     parser.add_argument("--bar-height", type=float, required=True)
+    parser.add_argument(
+        "--bar-mode",
+        choices=("red", "edge"),
+        default="red",
+        help="red: night red-crossbar response (default). edge: daylight "
+        "edge/dark-line response with no red requirement.",
+    )
+    parser.add_argument(
+        "--bar-y-prior",
+        type=float,
+        default=None,
+        help="edge mode: image-y of the expected crossbar (e.g. pose-derived); "
+        "selects the candidate nearest this height over the stronger mat-top edge.",
+    )
     parser.add_argument("--upright-separation", type=float, default=DEFAULT_UPRIGHT_SEPARATION_M)
     parser.add_argument("--output-json", required=True, type=Path)
     parser.add_argument("--debug-image", required=True, type=Path)
@@ -1779,13 +1863,17 @@ def main() -> None:
             "right_base_px": [round(float(value), 3) for value in right_base],
         }
 
-    config = BarScanConfig(
+    common = dict(
         scan_step_px=args.scan_step_px,
         band_radius_px=args.band_radius_px,
         sweep_samples=args.sweep_samples,
         sweep_bins=args.sweep_bins,
         min_pad_to_bar_gap_px=args.min_pad_to_bar_gap_px,
     )
+    if args.bar_mode == "edge":
+        config = BarScanConfig.edge_mode(bar_y_prior_px=args.bar_y_prior, **common)
+    else:
+        config = BarScanConfig(**common)
     detection = detect_bar_from_base_posts(
         frame,
         left_base_px=left_base,

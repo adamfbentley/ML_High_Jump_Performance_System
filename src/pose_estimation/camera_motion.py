@@ -31,6 +31,7 @@ involved here; this is purely about camera stillness.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -41,12 +42,14 @@ __all__ = [
     "StableWindow",
     "CameraMotionResult",
     "StabilizedWindow",
+    "StaticPlate",
     "estimate_homography",
     "background_displacement",
     "estimate_camera_motion",
     "find_stable_window",
     "analyze_camera_motion",
     "stabilize_window",
+    "build_static_plate",
     "remap_points_through_homography",
     "warp_frame_to_reference",
 ]
@@ -467,4 +470,153 @@ def stabilize_window(
         mean_residual_px=float(np.mean(finite_resid)) if finite_resid else float("inf"),
         max_residual_px=float(np.max(finite_resid)) if finite_resid else float("inf"),
         n_registered=int(sum(1 for h in homographies if h is not None)),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Static-plate synthesis (clean apparatus image for detection)
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class StaticPlate:
+    """A clean, athlete-free background image synthesized from a window.
+
+    ``plate`` is the per-pixel temporal median of the window after every frame is
+    warped onto the reference, so the moving athlete (a minority occupant of any
+    given background pixel) dissolves while the fixed apparatus/ground sharpen.
+    ``coverage`` is the fraction of contributing frames per pixel in ``[0, 1]``
+    (low near the warped borders); pixels with zero coverage fall back to the
+    reference frame so the plate is always a complete image.
+    """
+
+    plate: np.ndarray  # (H, W, 3) uint8, reference-frame geometry
+    coverage: np.ndarray  # (H, W) float32 in [0, 1]
+    ref_index: int
+    frame_indices: list[int]
+    n_frames_used: int
+
+
+def build_static_plate(
+    frames: Sequence[np.ndarray],
+    frame_indices: Sequence[int],
+    *,
+    ref_index: int,
+    foreground_masks: Sequence[np.ndarray | None] | None = None,
+    stabilized: StabilizedWindow | None = None,
+    config: MotionConfig = MotionConfig(),
+    max_plate_frames: int = 24,
+) -> StaticPlate:
+    """Synthesize an athlete-free apparatus plate from a (stabilized) window.
+
+    Each window frame is registered to ``ref_index`` (reusing ``stabilized`` if
+    supplied, else calling :func:`stabilize_window`) and warped into the
+    reference view.  The athlete is excluded per frame via ``foreground_masks``
+    (warped along with the frame); the surviving contributions are reduced by a
+    per-pixel median, which is robust to the athlete occupying any given pixel in
+    a minority of frames.  On a genuinely stationary clip the homographies are
+    ~identity and this is a plain temporal median.
+
+    The result is a single clean image suitable for line-based apparatus
+    detection without the jumper, limbs, shadow, or motion blur in the frame.
+
+    Args:
+        frames: Absolute-indexed sequence of BGR frames (full decoded clip).
+        frame_indices: Window frames to combine.
+        ref_index: Reference frame (must be in ``frame_indices``); defines the
+            output geometry.
+        foreground_masks: Optional absolute-indexed athlete masks (truthy =
+            athlete) to exclude from the median.
+        stabilized: Optional precomputed registration for this exact window.
+        config: Motion-estimation tuning.
+        max_plate_frames: Subsample the window to at most this many frames
+            (evenly, always keeping the reference) to bound work and memory.
+
+    Returns:
+        A :class:`StaticPlate`.
+    """
+    cv2 = _require_cv2()
+    indices = [int(i) for i in frame_indices]
+    if ref_index not in indices:
+        raise ValueError("ref_index must be one of frame_indices")
+
+    if stabilized is None:
+        stabilized = stabilize_window(
+            frames,
+            indices,
+            ref_index=ref_index,
+            foreground_masks=foreground_masks,
+            config=config,
+        )
+    h_by_index = dict(zip(stabilized.frame_indices, stabilized.homographies))
+
+    # Subsample evenly while always keeping the reference frame.
+    usable = [i for i in indices if h_by_index.get(i) is not None]
+    if len(usable) > max_plate_frames:
+        keep = np.linspace(0, len(usable) - 1, max_plate_frames).round().astype(int)
+        sel = {usable[k] for k in keep}
+        sel.add(ref_index)
+        usable = [i for i in usable if i in sel]
+
+    ref_frame = np.asarray(frames[ref_index])[:, :, :3].astype(np.uint8, copy=False)
+    height, width = ref_frame.shape[:2]
+    ones = np.full((height, width), 255, np.uint8)
+
+    warped_frames: list[np.ndarray] = []
+    valid_masks: list[np.ndarray] = []
+    for idx in usable:
+        h_mat = h_by_index.get(idx)
+        if h_mat is None:
+            continue
+        frame = np.asarray(frames[idx])[:, :, :3].astype(np.uint8, copy=False)
+        warped = warp_frame_to_reference(frame, h_mat, size=(width, height))
+        coverage = warp_frame_to_reference(ones, h_mat, size=(width, height)) > 0
+        valid = coverage
+        if foreground_masks is not None and idx < len(foreground_masks):
+            fg = foreground_masks[idx]
+            if fg is not None:
+                fg_u8 = (np.asarray(fg).astype(bool).astype(np.uint8)) * 255
+                fg_warped = warp_frame_to_reference(fg_u8, h_mat, size=(width, height))
+                valid = valid & (fg_warped < 128)
+        warped_frames.append(warped)
+        valid_masks.append(valid)
+
+    if not warped_frames:
+        return StaticPlate(
+            plate=ref_frame.copy(),
+            coverage=np.zeros((height, width), np.float32),
+            ref_index=int(ref_index),
+            frame_indices=indices,
+            n_frames_used=0,
+        )
+
+    n = len(warped_frames)
+    plate = np.empty((height, width, 3), np.uint8)
+    coverage = np.zeros((height, width), np.float32)
+    # Median in horizontal strips to bound peak memory on full-res clips.
+    strip = max(16, 2_000_000 // max(1, width * n))
+    for y0 in range(0, height, strip):
+        y1 = min(height, y0 + strip)
+        stack = np.empty((n, y1 - y0, width, 3), np.float32)
+        valid_stack = np.empty((n, y1 - y0, width), bool)
+        for k in range(n):
+            stack[k] = warped_frames[k][y0:y1].astype(np.float32)
+            valid_stack[k] = valid_masks[k][y0:y1]
+        stack[~valid_stack] = np.nan
+        with warnings.catch_warnings():
+            # Fully-occluded pixels are an all-NaN slice by design; they fall
+            # back to the reference frame just below.
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            med = np.nanmedian(stack, axis=0)
+        cov = valid_stack.mean(axis=0).astype(np.float32)
+        # Pixels no frame covered: fall back to the reference frame.
+        empty = ~np.isfinite(med).all(axis=2)
+        med[empty] = ref_frame[y0:y1][empty].astype(np.float32)
+        plate[y0:y1] = np.clip(med, 0, 255).astype(np.uint8)
+        coverage[y0:y1] = cov
+
+    return StaticPlate(
+        plate=plate,
+        coverage=coverage,
+        ref_index=int(ref_index),
+        frame_indices=indices,
+        n_frames_used=n,
     )

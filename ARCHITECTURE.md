@@ -89,15 +89,34 @@ services_scaffold/      Parked deployment scaffolding, not part of research pipe
   apparatus detector (standards / crossbar / landing-pad). Admits an upright
   pair only when it has a crossbar/pad relationship, so isolated background
   floodlight masts are rejected; colour is additive-only evidence. Reproduces
-  the night-red anchors without requiring red; partial on daylight clips.
-  `detect_apparatus_geometry_stable` aggregates detections across frames. CLI:
-  `scripts/detect_apparatus_geometry.py`.
-- `camera_motion.py`: background (camera) motion estimation and **takeoff-window
-  stabilization**. `estimate_camera_motion`/`find_stable_window` give a per-frame
+  the night-red anchors without requiring red; partial on daylight clips
+  (background buildings/sheds whose corners+roofline mimic an apparatus still
+  fool it ~2/3 of the time, even on a clean plate). `detect_apparatus_geometry`
+  takes an optional `athlete_center_x_px` bias (no masking) for athlete-free
+  inputs; `detect_apparatus_geometry_stable` aggregates detections across frames.
+  CLI: `scripts/detect_apparatus_geometry.py` (`--plate` mode detects on a
+  synthesized static plate). The reliable anchor route is the manual click tool
+  `scripts/annotate_apparatus.py`.
+- `apparatus_pose_prior.py`: **pose-localized apparatus ROI**. From the 2D pose
+  track it finds the CoM apex (over the bar), a metric stature ruler, and the
+  ground line, yielding an ROI that brackets the apparatus plus pose-derived
+  `bar_x` / `bar_y` / `ground_y`. Appearance- and angle-agnostic; restricts
+  apparatus search to where the jump happens so background structures are not
+  matched. Driven by `scripts/detect_apparatus_geometry.py --pose-roi`.
+- `apparatus_vp.py`: vanishing-point-constrained 5-line apparatus fit seeded by
+  the pose ROI (2 standards + bar/pad-top/ground). Available utility; the
+  daylight `--pose-roi` path currently uses the pose-apex bar instead, as the
+  faint daylight crossbar is not reliably detectable.
+- `camera_motion.py`: background (camera) motion estimation, **takeoff-window
+  stabilization**, and **static-plate synthesis**.
+  `estimate_camera_motion`/`find_stable_window` give a per-frame
   background-displacement signal; `stabilize_window` registers a window to a
   reference frame via background homography (athlete masked) and remaps
   landmarks, turning a panning/zooming takeoff window into an effectively
-  stationary one. CLI: `scripts/scan_stable_windows.py`. See
+  stationary one. `build_static_plate` takes the per-pixel temporal median of a
+  (stabilized) window so the moving athlete dissolves, yielding a clean
+  athlete-free apparatus image for line-based detection (or manual annotation).
+  CLI: `scripts/scan_stable_windows.py`. See
   `memory/plans/moving_footage_physics_plan.md`. (The gravity/PnP projectile
   physics that would have consumed this is parked — see note below.)
 - `egomotion.py`: Phase 9c background optical-flow camera-motion compensation.
@@ -243,7 +262,8 @@ be trusted.
 | `scripts/render_pose_overlay.py` | Render pose overlays for inspection. |
 | `scripts/create_takeoff_focus_clips.py` | Create ignored, static-crop derivative clips around takeoff/flight for current-footage rescue experiments. |
 | `scripts/detect_stable_takeoff_anchors.py` | Experimental one-frame apparatus anchor detector for stable takeoff-window review; currently reliable only for the red/night apparatus clips, not daylight stationary footage. |
-| `scripts/detect_apparatus_geometry.py` | Geometry-first, colour-agnostic apparatus detector (single frame or temporal). Rejects background poles via the crossbar/pad relationship; partial on daylight clips. |
+| `scripts/detect_apparatus_geometry.py` | Geometry-first, colour-agnostic apparatus detector (single frame, temporal, or `--plate` static-plate). Rejects background floodlight masts via the crossbar/pad relationship; still fooled by apparatus-shaped background buildings on ~2/3 of daylight clips. |
+| `scripts/annotate_apparatus.py` | Manual click-to-annotate tool: place the 4 standard anchors by hand on a frame or static plate and write the same `points_px` JSON. The reliable anchor path; clicks double as labels for a future learned detector. |
 | `scripts/scan_stable_windows.py` | Scan clips for background camera motion and report the takeoff stable window. NB: the *longest* still run is usually the pre-run-up standstill, not the takeoff. |
 
 (Parked, branch `parked/moving-footage-physics`: `analyze_stable_takeoff_window.py`

@@ -8,6 +8,7 @@ import pytest
 from src.pose_estimation.camera_motion import (
     MotionConfig,
     background_displacement,
+    build_static_plate,
     estimate_camera_motion,
     estimate_homography,
     find_stable_window,
@@ -162,3 +163,61 @@ def test_remap_preserves_nan_points():
     out = remap_points_through_homography(pts, h)
     assert out[0] == pytest.approx([10.0, 20.0])
     assert np.isnan(out[1]).all()
+
+
+def test_build_static_plate_removes_moving_athlete_stationary_clip():
+    cv2 = pytest.importorskip("cv2")
+    # Stationary camera: a bright "athlete" block sweeps across a fixed scene.
+    # The temporal median must recover the background wherever the block is a
+    # minority occupant (it is, at every column, since it only dwells briefly).
+    base = _textured_scene(seed=11)
+    h, w = base.shape[:2]
+    indices = list(range(11))
+    frames = []
+    for i in indices:
+        f = base.copy()
+        x = 40 + i * 40  # block marches left->right across the frame
+        cv2.rectangle(f, (x, 120), (x + 60, 300), (255, 255, 255), -1)
+        frames.append(f)
+
+    plate = build_static_plate(frames, indices, ref_index=5)
+    assert plate.n_frames_used == len(indices)
+    assert plate.plate.shape == base.shape
+    # The plate must look like the clean background, not any single athlete frame.
+    plate_err = np.abs(plate.plate.astype(float) - base.astype(float)).mean()
+    frame_err = np.abs(frames[5].astype(float) - base.astype(float)).mean()
+    assert plate_err < frame_err
+    assert plate_err < 6.0  # background recovered to within a few grey levels
+    # Interior coverage is full (every frame contributes; no warping on a
+    # stationary clip).
+    assert plate.coverage[h // 2, w // 2] == pytest.approx(1.0)
+
+
+def test_build_static_plate_foreground_mask_excludes_athlete():
+    cv2 = pytest.importorskip("cv2")
+    # A block dwells at x=300 for the MAJORITY of frames (a plain median would
+    # keep it) and steps aside for two frames that expose the background there.
+    # The foreground mask must drop the dwelling block so the median recovers the
+    # background from the minority clear views.
+    base = _textured_scene(seed=12)
+    indices = list(range(7))
+    frames = []
+    masks = []
+    for i in indices:
+        f = base.copy()
+        x = 600 if i >= 5 else 300  # clears the x=300 region only in frames 5,6
+        cv2.rectangle(f, (x, 150), (x + 50, 280), (255, 255, 255), -1)
+        m = np.zeros(base.shape[:2], dtype=bool)
+        m[150:280, x : x + 50] = True
+        frames.append(f)
+        masks.append(m)
+
+    region = (slice(150, 280), slice(300, 350))
+    # Without a mask the dwelling block survives the median.
+    no_mask = build_static_plate(frames, indices, ref_index=3)
+    no_mask_err = np.abs(no_mask.plate[region].astype(float) - base[region].astype(float)).mean()
+    assert no_mask_err > 100.0  # block still present
+    # With the mask it is excluded and the background is recovered.
+    masked = build_static_plate(frames, indices, ref_index=3, foreground_masks=masks)
+    masked_err = np.abs(masked.plate[region].astype(float) - base[region].astype(float)).mean()
+    assert masked_err < 12.0

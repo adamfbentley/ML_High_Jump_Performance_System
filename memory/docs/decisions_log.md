@@ -276,3 +276,49 @@
   user-directed cleanup (commit `f29bfd7` + Codex "remove the gravity stuff") had
   removed. This entry reconciles to the intended state: gravity physics parked,
   promising CV tools retained.
+
+## 2026-06-17 (later) — apparatus detection: static plate + manual annotation
+
+- Decision: attack apparatus detection with a **static-plate** path plus a
+  **manual click** fallback, rather than chasing a fully-automatic geometry
+  detector. Rationale: MediaPipe's skeleton is human-specific and cannot detect
+  the bar; its ObjectDetector (COCO) has no apparatus class; only its
+  InteractiveSegmenter is usable and still needs a seed. The real new leverage is
+  the stabilization — on a (stabilized) clip the apparatus is the part that does
+  not move while the athlete does.
+- Built `build_static_plate` (`camera_motion.py`): per-pixel temporal median of a
+  window registered to a reference; the moving athlete dissolves, leaving a clean
+  apparatus-only image. `detect_apparatus_geometry` gained an `athlete_center_x_px`
+  bias-only arg; `detect_apparatus_geometry.py --plate` and the manual tool
+  `scripts/annotate_apparatus.py` were added. +2 CV tests (302 non-PINN green).
+- Finding: the **plate is excellent on all 3 daylight stationary clips** (athlete
+  fully removed) but pure-geometry auto-detect is still only ~1/3 right — clips
+  2–3 latch the **background shed roofline** (sep ≈ 549/664 px vs the real
+  ≈ 178 px), which is geometrically two corners + a crossbar. So the manual click
+  on the plate is the reliable anchor route for now; clicks double as labels for a
+  future learned 4-point detector.
+- Scope note: this is detection/scale work and does **not** revive the parked
+  monocular projectile physics (still depth-degenerate). Better anchors give
+  scene scale, not a well-posed velocity solve.
+
+## 2026-06-17 (later 2) — apparatus detection: pose-localized ROI
+
+- Decision: the generalisable apparatus cue is the **athlete's own jump**. Built
+  `apparatus_pose_prior.compute_apparatus_roi` (apex→bar, plant→standards,
+  stature→scale) + `detect_apparatus_geometry.py --pose-roi`. User-confirmed: the
+  ROI reliably brackets the apparatus on the daylight trio (kills the background
+  shed that fooled colour/geometry).
+- Found the prior working detector `detect_stable_takeoff_anchors.py`: it is
+  base-post-driven + a **red** crossbar scan (response 0.62·red+0.38·edge, bar
+  requires red_coverage≥0.65), so it only ever worked on the night clips
+  (IMG_4829/4830). Added opt-in `--bar-mode edge` (drops red), but the faint
+  daylight crossbar is still not reliably detectable — the landing-mat top edge
+  dominates any edge/dark-line response. Kept experimental.
+- Consequence: in the daylight `--pose-roi` path the **bar line is taken from the
+  pose apex** (physically the bar height), not from crossbar detection nor from a
+  geometric bar (horizontal standard separation is corrupted by perspective).
+  Current status: bases auto-seeded (sometimes correct, e.g. clip 2 both), bar at
+  pose-apex height; remaining error is the left/right **top** under perspective
+  and occasional wrong standard seed. Reliable anchors today: hand-label via
+  `label_scene_anchors.py`. Removed the accidental duplicate click tool
+  `annotate_apparatus.py` in favour of the existing `label_scene_anchors.py`.

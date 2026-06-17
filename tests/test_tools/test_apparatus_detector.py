@@ -151,6 +151,54 @@ def test_detector_admits_pad_pair_without_a_crossbar():
     assert det.has_pad
 
 
+def test_pad_bar_vertical_ratio_prior_matches_known_geometry():
+    pytest.importorskip("cv2")
+    # Build the bar / pad-top / pad-bottom triple at the world-correct spacing:
+    # ratio (bar->pad-top)/(bar->pad-bottom) == 1 - H_pad/H_bar == 1 - 0.70/1.75 = 0.60.
+    frame = _blank()
+    pale = (210, 210, 210)
+    dark_bar = (45, 45, 45)
+    bright = (235, 235, 235)
+    left_x, right_x = 380, 600
+    bar_y, pad_top_y, pad_bottom_y = 200, 350, 450  # 150/250 = 0.60
+    y_base = pad_bottom_y
+    _draw_post(frame, left_x, y_base, bar_y, pale)
+    _draw_post(frame, right_x, y_base, bar_y, pale)
+    _draw_bar(frame, left_x - 6, right_x + 6, bar_y, dark_bar, thickness=4)
+    _draw_bar(frame, left_x + 4, right_x - 4, pad_top_y, bright, thickness=3)
+    _draw_bar(frame, left_x + 2, right_x - 2, pad_bottom_y, bright, thickness=4)
+
+    det = detect_apparatus_geometry(frame, bar_height_m=1.75)
+    assert det is not None
+    assert det.has_crossbar and det.has_pad
+    assert det.pad_bottom is not None
+    assert det.pad_ratio == pytest.approx(0.60, abs=0.08)
+    assert det.pad_ratio_expected == pytest.approx(0.60, abs=0.02)
+
+
+def test_pad_bar_ratio_prior_boosts_correct_ratio_over_wrong_ratio():
+    pytest.importorskip("cv2")
+    pale = (210, 210, 210)
+    dark_bar = (45, 45, 45)
+    bright = (235, 235, 235)
+    left_x, right_x = 380, 600
+
+    def _triple(pad_top_y: int) -> float:
+        frame = _blank()
+        _draw_post(frame, left_x, 450, 200, pale)
+        _draw_post(frame, right_x, 450, 200, pale)
+        _draw_bar(frame, left_x - 6, right_x + 6, 200, dark_bar, thickness=4)
+        _draw_bar(frame, left_x + 4, right_x - 4, pad_top_y, bright, thickness=3)
+        _draw_bar(frame, left_x + 2, right_x - 2, 450, bright, thickness=4)
+        det = detect_apparatus_geometry(frame, bar_height_m=1.75)
+        assert det is not None
+        return det.score
+
+    # pad-top at the correct 0.60 ratio (y=350) should score higher than a
+    # pad-top at a clearly wrong ratio (y=260, ratio 0.24) for the same pair.
+    assert _triple(350) > _triple(260)
+
+
 def test_stable_aggregation_reports_consistent_geometry():
     pytest.importorskip("cv2")
     frames = [_make_pale_apparatus(with_bar=True) for _ in range(4)]

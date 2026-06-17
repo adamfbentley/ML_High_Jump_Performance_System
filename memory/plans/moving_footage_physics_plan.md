@@ -185,6 +185,35 @@ trio has good poses (61-73 %) but the apparatus detector does not yet lock on.
 and (b) CoM density/toe-off precision in the takeoff window**, so the (working,
 well-posed) bar-plane solver finally gets a clean input to prove itself on.
 
+### Phase C — static-plate detection + manual annotation (2026-06-17)
+Built two things to attack apparatus detection on stabilized/stationary clips:
+
+- `build_static_plate` in `src/pose_estimation/camera_motion.py`: registers a
+  window to a reference (reusing `stabilize_window`) and takes the per-pixel
+  temporal **median**, so the moving athlete dissolves and the fixed apparatus
+  sharpens. On a stationary clip the homographies are ~identity and it is a plain
+  temporal median. Athlete excluded via warped foreground masks; fully-occluded
+  pixels fall back to the reference. `detect_apparatus_geometry` gained an
+  `athlete_center_x_px` bias-without-masking arg (the plate has no athlete to
+  mask, and at apex the bbox would overlap the crossbar). `--plate` mode added to
+  `scripts/detect_apparatus_geometry.py`. +2 CV tests.
+- `scripts/annotate_apparatus.py`: click the 4 standard anchors by hand on a
+  frame or plate; writes the same `points_px` schema. Reliable, and the clicks
+  are labels for a future learned 4-point regressor.
+
+**Empirical result on the daylight stationary trio (bar 1.75 m), median over ~24
+frames spanning each clip:** the **plate is excellent on all 3** — Athlete A is
+fully removed, giving a clean athlete-free scene. But pure-geometry auto-detection
+on the plate is right on only ~1/3 (clip 1 locks the standards by the mat,
+sep ≈ 178 px; clips 2–3 latch the **background shed roofline**, sep ≈ 549/664 px
+— that structure is geometrically two corners + a crossbar). So the clean plate
+helps but does not by itself solve detection on scenes with apparatus-shaped
+buildings. Operationally: try the auto plate detector, accept if the overlay is
+right, otherwise click 4 points on the plate. Possible future auto improvement:
+bias toward the athlete's bar-crossing (apex) position rather than the whole-clip
+median centre, and/or a separation-vs-foreground sanity prior to reject the
+oversized background structure.
+
 ### Parallel spikes (offline/cloud, not blocking)
 - Small 4-anchor keypoint regressor for the apparatus (thin-bar-friendly; corpus
   is large enough to label ~100–200 frames × 4 points).

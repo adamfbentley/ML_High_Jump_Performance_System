@@ -42,6 +42,16 @@ def _draw_sloped_line(
     )
 
 
+def test_edge_mode_config_drops_red_requirement():
+    # The daylight preset disables the red requirement and reweights the response
+    # to edge + dark-horizontal-line; defaults remain the red night behaviour.
+    edge = BarScanConfig.edge_mode()
+    assert edge.require_red is False
+    assert edge.red_weight == 0.0
+    assert edge.dark_line_weight > 0.0
+    assert BarScanConfig().require_red is True
+
+
 def test_detect_bar_from_base_posts_skips_pad_and_noisy_background():
     pytest.importorskip("cv2")
     frame = np.full((520, 760, 3), 42, dtype=np.uint8)

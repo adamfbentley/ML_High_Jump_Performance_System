@@ -127,6 +127,34 @@ Stationary pilot outcome (5 clips, 2 captures, explicitly confirmed fixed camera
   *without* requiring red and correctly rejects the floodlight masts (no paired
   crossbar), but is still only ~1/3 reliable on the daylight stationary clips
   (one clip clean, one wrong substructure, one missed). Not yet admission-grade.
+- Apparatus detection update (2026-06-17): added a **static-plate** path —
+  `build_static_plate` (in `camera_motion.py`) registers a window to a reference
+  and takes the per-pixel temporal median, so the moving athlete dissolves into a
+  clean apparatus-only image; `detect_apparatus_geometry.py --plate` detects on
+  it. On the daylight trio the **plate is excellent on all 3** (Athlete A fully
+  removed), but pure-geometry auto-detect is still only ~1/3 right (clips 2–3
+  latch the background shed roofline, which is geometrically two corners + a
+  crossbar). The reliable anchor route is now the manual click tool
+  `scripts/annotate_apparatus.py` (clean plate → click 4 points → exact
+  `points_px`); its clicks also seed a future learned 4-point detector. NB:
+  per the parked-physics finding, better anchors give scene **scale**, they do
+  not by themselves revive the degenerate monocular projectile solve.
+- Apparatus detection update (2026-06-17, pose-ROI): the generalisable approach is
+  **pose-localized**. `src/pose_estimation/apparatus_pose_prior.py` uses the
+  athlete's CoM apex (over the bar), takeoff plant, and stature ruler to bracket
+  the apparatus and give `bar_x`, a ground line, and a bar-height prior;
+  `scripts/detect_apparatus_geometry.py --pose-roi` then seeds the two standards
+  from vertical structure inside the ROI and sets the **bar line from the pose
+  apex** (the faint daylight crossbar is not directly detectable — the landing-mat
+  top edge dominates any edge response — and a geometric bar from horizontal
+  standard separation is corrupted by perspective). Status on the daylight trio:
+  ROI brackets the apparatus reliably; base posts are sometimes correct (clip 2
+  both correct); the remaining error is the **left/right top** under perspective
+  (flat-bar assumption) and occasional wrong standard seed. The prior red detector
+  `detect_stable_takeoff_anchors.py` gained an opt-in `--bar-mode edge` (drops the
+  red requirement) but the faint daylight bar is still not reliably found, so this
+  is experimental. Reliable anchors today: hand-label via
+  `scripts/label_scene_anchors.py`.
 - Moving-footage CV tooling (2026-06-14): `src/pose_estimation/camera_motion.py`
   measures background camera motion and **stabilizes** a takeoff-centred window
   to a reference (a ~6 px/frame panning takeoff window registers to sub-pixel

@@ -707,6 +707,19 @@ Three pieces landed, each with synthetic tests (128 suite green):
 > `camera_motion.py` (with their CLIs/tests). The reliable physics route stays the
 > stationary + anatomical production path.
 
+**Apparatus detection — static plate + manual annotation (2026-06-17).** Added
+`build_static_plate` to `camera_motion.py`: register a window to a reference and
+take the per-pixel temporal median, so the moving athlete dissolves into a clean
+apparatus-only image (`detect_apparatus_geometry.py --plate` detects on it). On
+the daylight stationary trio the **plate is excellent on all 3** — Athlete A fully
+removed — but pure-geometry auto-detect is still only ~1/3 right: clips 2–3 latch
+the **background shed roofline** (sep ≈ 549/664 px vs the real ≈ 178 px), which is
+geometrically two corners + a crossbar. So the reliable anchor route is now the
+manual click tool `scripts/annotate_apparatus.py` (clean plate → click 4 points →
+exact `points_px`); the clicks double as labels for a future learned 4-point
+detector. Detection/scale only — it does not revive the parked monocular
+projectile physics. 302 non-PINN tests green.
+
 - `src/pose_estimation/apparatus_detector.py` — geometry-first, colour-agnostic
   apparatus detector. Admits an upright pair only with a crossbar/landing-pad
   relationship, so background floodlight masts are rejected. Reproduces the
