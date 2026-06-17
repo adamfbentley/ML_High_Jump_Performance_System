@@ -50,14 +50,6 @@ rg -n "stationary|stationary_camera|Phase 10" memory ROADMAP.md
     --roi-crop on \
     --save-samples <ignored-samples-dir>
 
-# Experimental stable takeoff-window physics from a panned-run-up clip
-.venv/Scripts/python.exe scripts/analyze_stable_takeoff_window.py \
-    --video "<stable-window-derivative.mp4>" \
-    --anchor-json "<manual-apparatus-anchors.json>" \
-    --bar-height 1.75 \
-    --roi-crop on \
-    --output data/results/stationary_validation/stable_takeoff_window_v1.json
-
 # Dry-run personal fine-tuning (loads the admitted cache, applies guardrails)
 .venv/Scripts/python.exe scripts/finetune_personal.py \
     --samples-dir <ignored-samples-dir> --dry-run
@@ -135,32 +127,24 @@ Stationary pilot outcome (5 clips, 2 captures, explicitly confirmed fixed camera
   *without* requiring red and correctly rejects the floodlight masts (no paired
   crossbar), but is still only ~1/3 reliable on the daylight stationary clips
   (one clip clean, one wrong substructure, one missed). Not yet admission-grade.
-- Moving-footage takeoff workstream (2026-06-14, see
-  `memory/plans/moving_footage_physics_plan.md`): new
-  `src/pose_estimation/camera_motion.py` measures background camera motion and
-  **stabilizes** a takeoff-centred window to a reference (proven: a ~6 px/frame
-  panning takeoff window registers to sub-pixel residual). Corpus scan finding:
-  "longest still window" is the pre-run-up standstill, **not** the takeoff — the
-  takeoff is where the camera pans, so the window must be centred on the detected
-  toe-off, and stabilization (not stillness) is the enabler. End-to-end
-  orchestration is `scripts/analyze_moving_takeoff.py`.
-- **Stable takeoff-window PnP root cause (2026-06-14): the impossible velocities
-  are a solver degeneracy, not a detection bug.** The free-depth 3D projectile
-  fit in `analyze_stable_takeoff_window.py` is unobservable along the camera
-  optical axis, so out-of-plane velocity runs away (vh ≈ 662 m/s on
-  IMG_4829/4830 — independent of camera motion). Fixed a residual-length bug in
-  `_projectile_residuals` and added a soft horizontal-speed cap. The validated
-  fix is a **bar-plane-constrained 2D gravity fit** (warp CoM through the
-  apparatus-plane homography): on IMG_4829 it yields physical metrics
-  (~40–46°, vh 2–4 m/s) vs the 3D fit's −60°. The bar-plane solver now exists
-  (`--solver bar_plane`, the default; gravity-as-scale form recovering depth
-  scale k, angle scale-invariant) with synthetic tests. **Validation moved the
-  blocker upstream:** on IMG_4829 the takeoff-window CoM is too sparse/noisy and
-  the athlete sits well off the bar plane (warped scene X≈−6 m vs ±2.01 m
-  standards), so the solver correctly rejects it. We lack a clip with *both* good
-  takeoff-window pose validity *and* apparatus anchors. Next: apparatus detection
-  on the good-pose daylight clips + denser CoM / precise toe-off. Apparatus/PnP
-  fits remain rejected diagnostics only.
+- Moving-footage CV tooling (2026-06-14): `src/pose_estimation/camera_motion.py`
+  measures background camera motion and **stabilizes** a takeoff-centred window
+  to a reference (a ~6 px/frame panning takeoff window registers to sub-pixel
+  residual). Corpus scan finding: "longest still window" is the pre-run-up
+  standstill, **not** the takeoff — the takeoff is where the camera pans, so a
+  window must be centred on the detected toe-off. Retained as active geometry
+  tooling (CLI `scripts/scan_stable_windows.py`).
+- **Gravity/PnP/bar-plane takeoff physics is PARKED (2026-06-17).** Root cause of
+  the long-standing impossible velocities: the monocular projectile fit is
+  degenerate along the camera optical axis (free-depth ⇒ vh ≈ 662 m/s, even on
+  stationary clips). A bar-plane gravity-as-scale variant is well-posed and gives
+  the right *angle*, but is starved by upstream data (sparse takeoff-window pose +
+  athlete off the bar plane). The whole gravity path —
+  `analyze_stable_takeoff_window.py`, `analyze_moving_takeoff.py`,
+  `gravity_calibration.py` — is preserved on branch
+  `parked/moving-footage-physics` (history `a0e7ca7`), not deleted. Do not revive
+  it for optimiser claims. The reliable physics route remains the stationary +
+  anatomical production path.
 
 The analyser now caches only `training_grade` clips when `--save-samples` is
 supplied, records every decision in ignored `_admission_manifest.json`, and

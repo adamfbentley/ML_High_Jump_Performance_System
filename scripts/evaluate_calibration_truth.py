@@ -20,9 +20,6 @@ if str(PROJECT_ROOT) not in sys.path:
 from scripts.analyze_jump_video import parse_bar_height  # noqa: E402
 from src.pose_estimation.egomotion import estimate_camera_motion  # noqa: E402
 from src.pose_estimation.estimators.mediapipe_estimator import MediaPipeEstimator  # noqa: E402
-from src.pose_estimation.gravity_calibration import (  # noqa: E402
-    calibrate_landmarks_with_gravity_mpp,
-)
 from src.pose_estimation.scale_calibration import (  # noqa: E402
     calibrate_landmarks_to_world,
     calibrate_landmarks_with_scene,
@@ -305,27 +302,6 @@ def evaluate_label_file(label_path: Path, thigh_m: float, shank_m: float) -> dic
         camera_motion=motion,
     )
 
-    gravity, gravity_info = (
-        calibrate_landmarks_with_gravity_mpp(
-            landmarks_2d,
-            landmarks_3d_world,
-            fps=fps,
-            image_width=width,
-            image_height=height,
-            takeoff_frame=takeoff_idx,
-            camera_motion=motion,
-        )
-        if takeoff_idx is not None
-        else (
-            np.full_like(landmarks_3d_world, np.nan, dtype=np.float32),
-            {
-                "method": "gravity_mpp_unavailable",
-                "accepted": False,
-                "decision_reason": "missing_takeoff_frame",
-            },
-        )
-    )
-
     detected_anchors = detect_scene_anchors(video_path, bar_height_m=bar_height)
     detected, detected_info = calibrate_landmarks_with_scene(
         landmarks_2d,
@@ -341,7 +317,6 @@ def evaluate_label_file(label_path: Path, thigh_m: float, shank_m: float) -> dic
     modes = {
         "anatomical": (anatomical, {"method": "anatomical"}),
         "egomotion": (egomotion, egomotion_info),
-        "egomotion_gravity_mpp": (gravity, gravity_info),
         "scene_homography": (detected, detected_info),
     }
 
@@ -383,9 +358,6 @@ def evaluate_label_file(label_path: Path, thigh_m: float, shank_m: float) -> dic
             "p95_vh_error_mps": p95_err,
             "accepted": info.get("accepted"),
             "decision_reason": info.get("decision_reason"),
-            "gravity_mpp": info.get("mpp"),
-            "gravity_r2": info.get("y_r_squared"),
-            "gravity_horizontal_accel_fraction": info.get("horizontal_accel_fraction"),
         }
     return out
 

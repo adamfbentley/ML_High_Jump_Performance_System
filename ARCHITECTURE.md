@@ -98,13 +98,11 @@ services_scaffold/      Parked deployment scaffolding, not part of research pipe
   reference frame via background homography (athlete masked) and remaps
   landmarks, turning a panning/zooming takeoff window into an effectively
   stationary one. CLI: `scripts/scan_stable_windows.py`. See
-  `memory/plans/moving_footage_physics_plan.md`.
+  `memory/plans/moving_footage_physics_plan.md`. (The gravity/PnP projectile
+  physics that would have consumed this is parked — see note below.)
 - `egomotion.py`: Phase 9c background optical-flow camera-motion compensation.
   Retained as historical panned-footage rescue infrastructure. It recovers much
   of the panning component but does not close the translational-scale gap.
-- `gravity_calibration.py`: Phase 9e experimental metres-per-pixel recovery
-  from flight-parabola curvature. It is correct on synthetic projectile data
-  but failed on handheld footage and is not part of the stationary workflow.
 - `skeleton/landmark_postprocessor.py`: gap filling, low-pass filtering, and
   segment-length enforcement.
 - `opensim_ik.py` plus `scripts/opensim_ik_subprocess.py`: optional OpenSim IK
@@ -116,6 +114,15 @@ Current policy: panned single-camera footage is not admitted to
 training-grade translational analysis. Stationary footage is required for
 Phase 10 fine-tuning and optimiser claims. The historical panned clips remain
 useful for relative technique review and detector development.
+
+Parked (2026-06-17): the gravity-rescue takeoff-physics path —
+`gravity_calibration.py` (Phase 9e flight-curvature mpp),
+`scripts/analyze_stable_takeoff_window.py` (apparatus PnP + bar-plane
+gravity-as-scale projectile fit), and `scripts/analyze_moving_takeoff.py` — is
+preserved on branch `parked/moving-footage-physics`, not in `main`. It is
+degenerate/under-constrained on this monocular footage; do not revive for
+optimiser claims. The non-gravity CV tooling above (`apparatus_detector.py`,
+`camera_motion.py`) stays active.
 
 ### Kinematics
 
@@ -238,8 +245,10 @@ be trusted.
 | `scripts/detect_stable_takeoff_anchors.py` | Experimental one-frame apparatus anchor detector for stable takeoff-window review; currently reliable only for the red/night apparatus clips, not daylight stationary footage. |
 | `scripts/detect_apparatus_geometry.py` | Geometry-first, colour-agnostic apparatus detector (single frame or temporal). Rejects background poles via the crossbar/pad relationship; partial on daylight clips. |
 | `scripts/scan_stable_windows.py` | Scan clips for background camera motion and report the takeoff stable window. NB: the *longest* still run is usually the pre-run-up standstill, not the takeoff. |
-| `scripts/analyze_stable_takeoff_window.py` | Experimental takeoff-window-only apparatus/PnP projectile fitter for panned-run-up clips with stationary final steps; diagnostic only — the free-depth 3D fit is degenerate (see plan), a bar-plane fit is the validated remedy. |
-| `scripts/analyze_moving_takeoff.py` | End-to-end moving-footage takeoff: detect toe-off, stabilize a takeoff-centred window, remap CoM, detect/solve apparatus, fit projectile. Diagnostic until the bar-plane solver lands. |
+
+(Parked, branch `parked/moving-footage-physics`: `analyze_stable_takeoff_window.py`
+and `analyze_moving_takeoff.py` — the gravity/PnP/bar-plane takeoff-physics fitters,
+shelved as degenerate on monocular footage.)
 
 ## Local Agent Memory
 

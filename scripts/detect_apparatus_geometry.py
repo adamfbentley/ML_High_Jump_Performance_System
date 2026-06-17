@@ -13,8 +13,8 @@ Two modes:
                               taking the per-anchor median and requiring stable
                               geometry.
 
-It writes a ``points_px`` JSON in the same schema consumed by
-``scripts/analyze_stable_takeoff_window.py`` plus a labelled debug overlay.
+It writes a ``points_px`` apparatus-anchor JSON (left/right base/top in pixels)
+plus a labelled debug overlay for visual review.
 The athlete is masked with MediaPipe Pose (athlete-avoidance only — pose never
 drives apparatus detection), and the athlete's horizontal position biases pair
 selection toward the takeoff apparatus.

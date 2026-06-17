@@ -3,6 +3,18 @@
 Status started: 2026-06-14. Owner: Claude/Codex execution. Reviewer gate: physics
 + phase-gate per AGENTS.md.
 
+> **STATUS 2026-06-17 — gravity/bar-plane physics PARKED.** The gravity-rescue
+> physics path (apparatus PnP + projectile / bar-plane gravity-as-scale fit) does
+> not yield trustworthy numbers and is parked on branch
+> `parked/moving-footage-physics` (and in history at `a0e7ca7`). What remains
+> ACTIVE on `main` from this workstream is the non-gravity CV tooling:
+> `src/pose_estimation/apparatus_detector.py` (colour-agnostic apparatus
+> detection) and `src/pose_estimation/camera_motion.py` (camera-motion estimation
+> + takeoff-window stabilization), with CLIs `detect_apparatus_geometry.py` and
+> `scan_stable_windows.py`. The reliable physics route is the stationary +
+> anatomical production path. The plan below is retained as the rationale/record
+> for if the physics direction is revived.
+
 ## Thesis
 
 Even panned phone clips are **quasi-stationary during the plant→takeoff→early-flight

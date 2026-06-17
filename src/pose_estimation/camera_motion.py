@@ -1,10 +1,12 @@
 """Background camera-motion estimation and stable-window detection.
 
-The takeoff physics solver (`scripts/analyze_stable_takeoff_window.py`) assumes a
-*stationary* camera across its fit window: one fixed camera pose is reused for
-every frame.  Most of the high-jump corpus is panned during the run-up but the
-camera is quasi-stationary during the biomechanically critical plant→takeoff→
-early-flight window (~0.2–0.5 s).
+A fixed-camera takeoff physics solver assumes a *stationary* camera across its
+fit window: one fixed camera pose is reused for every frame.  Most of the
+high-jump corpus is panned during the run-up but the camera is quasi-stationary
+during the biomechanically critical plant→takeoff→early-flight window
+(~0.2–0.5 s).  (The gravity/PnP projectile-fit physics that consumed this is
+parked on branch `parked/moving-footage-physics`; this module is retained as
+standalone camera-geometry tooling.)
 
 This module turns "the camera is probably still during the jump" into a measured,
 checkable quantity:

@@ -698,6 +698,15 @@ samples.
 physics from the panned corpus (`memory/plans/moving_footage_physics_plan.md`).
 Three pieces landed, each with synthetic tests (128 suite green):
 
+> **Update 2026-06-17 — gravity/PnP/bar-plane physics PARKED.** The
+> takeoff-physics fitters (`analyze_stable_takeoff_window.py`,
+> `analyze_moving_takeoff.py`, `gravity_calibration.py`) are degenerate /
+> under-constrained on this monocular footage and are preserved on branch
+> `parked/moving-footage-physics`, not in `main`. Retained as active CV tooling:
+> the colour-agnostic `apparatus_detector.py` and the camera-motion/stabilization
+> `camera_motion.py` (with their CLIs/tests). The reliable physics route stays the
+> stationary + anatomical production path.
+
 - `src/pose_estimation/apparatus_detector.py` — geometry-first, colour-agnostic
   apparatus detector. Admits an upright pair only with a crossbar/landing-pad
   relationship, so background floodlight masts are rejected. Reproduces the

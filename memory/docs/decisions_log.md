@@ -251,3 +251,28 @@
   (validated diagnostic: ~40-46 deg, vh 2-4 m/s on IMG_4829). End-to-end
   orchestration is `scripts/analyze_moving_takeoff.py`. No optimiser claims or
   fine-tuning until the planar solver lands and is validated.
+
+## 2026-06-17
+
+- Decision: **park the gravity-rescue / stable-window / bar-plane physics.** It
+  does not produce trustworthy numbers — the monocular projectile fit is
+  degenerate along the camera optical axis (free-depth: vh ~ 662 m/s), and the
+  bar-plane variant, while well-posed, is starved by upstream data (sparse
+  takeoff-window pose + the athlete sitting off the bar plane). Nothing is
+  deleted: the full work (incl. `gravity_calibration.py`,
+  `analyze_stable_takeoff_window.py` with the bar-plane solver, and
+  `analyze_moving_takeoff.py`) is preserved on branch
+  `parked/moving-footage-physics` and in history at `a0e7ca7`/`89b8c30`.
+- Kept on `main` as promising, non-gravity CV tooling:
+  `src/pose_estimation/apparatus_detector.py` (colour-agnostic apparatus
+  detection) and `src/pose_estimation/camera_motion.py` (camera-motion
+  estimation + sub-pixel takeoff-window stabilization), with their CLIs and
+  tests. These are geometry/detection, independent of the parked physics.
+- `evaluate_calibration_truth.py` de-gravity'd (drops the `egomotion_gravity_mpp`
+  mode). The reliable production route is unchanged: `analyze_jump_video.py`
+  stationary + anatomical calibration + contact-anchored kinematics.
+- Context: a prior session's "Restore moving-footage + bar-plane workstream"
+  commit (`a0e7ca7`) had inadvertently re-added the gravity files that an earlier
+  user-directed cleanup (commit `f29bfd7` + Codex "remove the gravity stuff") had
+  removed. This entry reconciles to the intended state: gravity physics parked,
+  promising CV tools retained.
