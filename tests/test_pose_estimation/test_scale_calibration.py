@@ -80,8 +80,8 @@ def test_standing_pixel_height():
 def test_compute_scale_factor():
     lm = _make_upright_landmarks_2d(n_frames=10, nose_y=0.1, ankle_y=0.7)
     scale = compute_scale_factor(lm, height_m=1.75)
-    # nose-to-ankle span = 0.6, effective height = 1.75 * 0.95 = 1.691
-    expected = 1.691 / 0.6
+    # nose-to-ankle span = 0.6, effective height = 1.75 * 0.95 = 1.6625
+    expected = 1.6625 / 0.6
     assert scale == pytest.approx(expected, rel=0.01)
 
 
